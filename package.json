@@ -10,7 +10,8 @@
     "lint": "oxlint .",
     "test": "vitest run src",
     "test:watch": "vitest src",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "deploy:pages": "bash scripts/deploy-github-pages.sh"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { botPoseAt, cycleSpectatorIndex, movementVelocity } from './movement'
+import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
 
 describe('runner movement rules', () => {
   it('normalizes diagonal input to the configured speed', () => {
@@ -33,16 +33,29 @@ describe('spectator target selection', () => {
 })
 
 describe('runner bot route', () => {
-  it('climbs as match time advances', () => {
+  it('rests on the platform instead of floating between jumps', () => {
+    const platform = platformPose(0)
     const start = botPoseAt(0, 0)
-    const later = botPoseAt(20, 0)
+    const waiting = botPoseAt(0.4, 0)
 
-    expect(later.y).toBeGreaterThan(start.y)
-    expect(later.escaped).toBe(false)
+    expect(start).toMatchObject({ x: platform.x, z: platform.z, escaped: false })
+    expect(start.y).toBeCloseTo(platform.y + 0.7)
+    expect(waiting).toMatchObject({ x: start.x, y: start.y, z: start.z })
   })
 
-  it('staggers bots and eventually reaches the exit', () => {
-    expect(botPoseAt(0, 1).y).not.toBe(botPoseAt(0, 0).y)
+  it('uses a visible jump arc and lands on the next platform', () => {
+    const jumping = botPoseAt(1.45, 0)
+    const landing = botPoseAt(2.3, 0)
+    const nextPlatform = platformPose(1)
+
+    expect(jumping.y).toBeGreaterThan(nextPlatform.y + 0.7)
+    expect(landing.x).toBeCloseTo(nextPlatform.x)
+    expect(landing.y).toBeCloseTo(nextPlatform.y + 0.7)
+    expect(landing.z).toBeCloseTo(nextPlatform.z)
+  })
+
+  it('delays bot starts and eventually reaches the exit', () => {
+    expect(botPoseAt(0, 1)).toMatchObject(botPoseAt(0, 0))
     expect(botPoseAt(60, 2).escaped).toBe(true)
   })
 })

@@ -8,7 +8,7 @@ import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
+import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 
 const PLATFORM_COUNT = 17
@@ -220,16 +220,7 @@ function Tower({ elapsed, lavaHeight, active, resetToken, spectating, spectatorI
   onEscape: () => void
 }) {
   const platforms = useMemo(
-    () => Array.from({ length: PLATFORM_COUNT }, (_, index) => {
-      if (index === 0) return { y: -3.2, x: 0, z: 0, width: 5.2 }
-      const angle = index * 0.72
-      return {
-        y: index * 0.68 - 3.2,
-        x: Math.sin(angle) * 2.25,
-        z: Math.cos(angle) * 1.75,
-        width: index % 4 === 0 ? 3.7 : 2.7,
-      }
-    }),
+    () => Array.from({ length: PLATFORM_COUNT }, (_, index) => platformPose(index)),
     [],
   )
 
@@ -248,7 +239,7 @@ function Tower({ elapsed, lavaHeight, active, resetToken, spectating, spectatorI
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
       </mesh>
       <Text position={[0, 10.25, 0]} fontSize={0.7} color="#ffd7a0" anchorX="center">
-        ESCAPE
+        탈출구
       </Text>
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
       {spectating && <SpectatorCamera elapsed={elapsed} targetIndex={spectatorIndex} />}
@@ -300,6 +291,7 @@ export default function HellbreakGame() {
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
   const match = stepMatch(rawMatch, elapsed)
   const finished = started && match.phase === 'finished'
+  const winnerLabel = match.winner === 'runners' ? '도망자' : '지옥 간수'
 
   useEffect(() => {
     if (!started || finished) return
@@ -333,40 +325,40 @@ export default function HellbreakGame() {
   }
 
   const status = !started
-    ? 'READY FOR BOT MATCH'
+    ? '봇 경기를 시작하세요'
     : finished
-      ? `${match.winner?.toUpperCase()} WIN · PRESS REMATCH`
+      ? `${winnerLabel} 승리 · 다시 경기를 시작하세요`
       : spectating
-        ? `SPECTATING RUNNER ${spectatorIndex + 1} · Q/E SWITCH`
+        ? `도망자 ${spectatorIndex + 1} 관전 중 · Q/E로 변경`
         : playerEscaped
-        ? 'YOU ESCAPED'
-        : 'CLIMB BEFORE THE LAVA'
+        ? '지옥 탈출 성공'
+        : '용암을 피해 위로 올라가세요'
 
   return (
     <main className="shell">
-      <section className="hud" aria-label="Game prototype information">
-        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · PLAYABLE MVP 0.2</div>
+      <section className="hud" aria-label="게임 정보와 조작법">
+        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.2</div>
         <h1>HELL<span>BREAK</span></h1>
-        <p className="tagline">RUN UP. FOOL THE WARDEN. ESCAPE HELL.</p>
+        <p className="tagline">올라가라. 간수를 속여라. 지옥을 탈출하라.</p>
         <div className="match-card">
-          <div><strong>{3 - escapedBots}</strong><small>BOTS CLIMBING</small></div>
-          <div><strong>{formatTime(elapsed)}</strong><small>LAVA RISING</small></div>
-          <div><strong>{deaths}</strong><small>LAVA FALLS</small></div>
+          <div><strong>{3 - escapedBots}</strong><small>등반 중인 봇</small></div>
+          <div><strong>{formatTime(elapsed)}</strong><small>남은 시간</small></div>
+          <div><strong>{deaths}</strong><small>용암 사망</small></div>
         </div>
         <p className="brief">
-          Race three autonomous runners to the exit. If the lava takes you, the match continues in
-          spectator mode—switch between surviving runners with Q and E.
+          상승하는 용암을 피해 발판을 올라 탈출구에 도착하세요. 용암에 빠져 죽으면 경기는
+          관전 모드로 계속되며, Q와 E로 살아 있는 도망자를 바꿔 볼 수 있습니다.
         </p>
         <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
-          {!started ? 'START BOT MATCH' : finished ? 'REMATCH' : 'RESTART MATCH'}
+          {!started ? '봇 경기 시작' : finished ? '다시 경기' : '경기 재시작'}
         </button>
         <ul>
-          <li><kbd>WASD</kbd> move</li>
-          <li><kbd>SPACE</kbd> jump</li>
-          <li><kbd>Q / E</kbd> spectate after death</li>
+          <li><kbd>WASD</kbd> 이동</li>
+          <li><kbd>SPACE</kbd> 점프</li>
+          <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>
         </ul>
       </section>
-      <section className="viewport" aria-label="Playable 3D vertical prison bot match">
+      <section className="viewport" aria-label="플레이 가능한 3D 수직 감옥 봇 경기">
         <GameScene
           elapsed={elapsed}
           lavaHeight={match.lavaHeight}
@@ -383,17 +375,17 @@ export default function HellbreakGame() {
         <div className="scanline" />
         <div className="game-banner">{status}</div>
         {spectating && !finished && (
-          <div className="spectator-controls" aria-label="Spectator controls">
+          <div className="spectator-controls" aria-label="관전 대상 변경">
             <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, -1, 3))}>
-              Q · PREV
+              Q · 이전
             </button>
-            <strong>RUNNER {spectatorIndex + 1}</strong>
+            <strong>도망자 {spectatorIndex + 1}</strong>
             <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, 1, 3))}>
-              E · NEXT
+              E · 다음
             </button>
           </div>
         )}
-        <div className="status"><i /> NEXT.JS LOCAL GAME ONLINE</div>
+        <div className="status"><i /> NEXT.JS 로컬 게임 실행 중</div>
       </section>
     </main>
   )
