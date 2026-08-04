@@ -19,17 +19,44 @@ export interface RoomPlayerState {
 export interface AuthoritativeRoomState {
   elapsed: number
   players: Record<string, RoomPlayerState>
+  sessions: Record<string, string>
 }
 
 const WALK_SPEED = 5.8
 const SPRINT_SPEED = 8.2
+const MAX_TICK_SECONDS = 0.1
+const MAX_ROOM_PLAYERS = 6
+const MAX_ID_LENGTH = 128
 
-export function createRoomState(): AuthoritativeRoomState {
-  return { elapsed: 0, players: Object.create(null) as Record<string, RoomPlayerState> }
+function validIdentity(value: string): boolean {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH
 }
 
-export function joinRoom(room: AuthoritativeRoomState, playerId: string): AuthoritativeRoomState {
-  if (Object.hasOwn(room.players, playerId)) return room
+function emptyRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>
+}
+
+function withoutKey<T>(record: Record<string, T>, removedKey: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => key !== removedKey))
+}
+
+export function createRoomState(): AuthoritativeRoomState {
+  return { elapsed: 0, players: emptyRecord<RoomPlayerState>(), sessions: emptyRecord<string>() }
+}
+
+export function joinRoom(
+  room: AuthoritativeRoomState,
+  playerId: string,
+  authenticatedSessionId: string,
+): AuthoritativeRoomState {
+  if (
+    !validIdentity(playerId)
+    || !validIdentity(authenticatedSessionId)
+    || Object.keys(room.players).length >= MAX_ROOM_PLAYERS
+    || Object.hasOwn(room.players, playerId)
+    || Object.hasOwn(room.sessions, authenticatedSessionId)
+  ) return room
+
   return {
     ...room,
     players: {
@@ -41,15 +68,30 @@ export function joinRoom(room: AuthoritativeRoomState, playerId: string): Author
         input: { sequence: 0 },
       },
     },
+    sessions: { ...room.sessions, [authenticatedSessionId]: playerId },
+  }
+}
+
+export function leaveRoom(room: AuthoritativeRoomState, authenticatedSessionId: string): AuthoritativeRoomState {
+  if (!Object.hasOwn(room.sessions, authenticatedSessionId)) return room
+  const playerId = room.sessions[authenticatedSessionId]
+
+  return {
+    ...room,
+    players: withoutKey(room.players, playerId),
+    sessions: withoutKey(room.sessions, authenticatedSessionId),
   }
 }
 
 export function applyPlayerInput(
   room: AuthoritativeRoomState,
-  playerId: string,
+  authenticatedSessionId: string,
   input: PlayerInputCommand,
 ): AuthoritativeRoomState {
-  if (!Object.hasOwn(room.players, playerId) || typeof input !== 'object' || input === null) return room
+  if (!Object.hasOwn(room.sessions, authenticatedSessionId) || typeof input !== 'object' || input === null) return room
+  const playerId = room.sessions[authenticatedSessionId]
+  if (!Object.hasOwn(room.players, playerId)) return room
+
   const player = room.players[playerId]
   const controls = [input.forward, input.backward, input.left, input.right, input.sprint]
   if (
@@ -60,11 +102,11 @@ export function applyPlayerInput(
 
   const command: PlayerInputCommand = {
     sequence: input.sequence,
-    forward: Boolean(input.forward),
-    backward: Boolean(input.backward),
-    left: Boolean(input.left),
-    right: Boolean(input.right),
-    sprint: Boolean(input.sprint),
+    forward: input.forward ?? false,
+    backward: input.backward ?? false,
+    left: input.left ?? false,
+    right: input.right ?? false,
+    sprint: input.sprint ?? false,
   }
 
   return {
@@ -78,7 +120,7 @@ export function applyPlayerInput(
 
 export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): AuthoritativeRoomState {
   if (!Number.isFinite(deltaSeconds)) return room
-  const delta = Math.max(0, deltaSeconds)
+  const delta = Math.min(MAX_TICK_SECONDS, Math.max(0, deltaSeconds))
   const players = Object.fromEntries(Object.entries(room.players).map(([id, player]) => {
     const speed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
     const velocity = movementVelocity(player.input, speed)
@@ -89,5 +131,5 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
     }]
   }))
 
-  return { elapsed: room.elapsed + delta, players }
+  return { ...room, elapsed: room.elapsed + delta, players }
 }

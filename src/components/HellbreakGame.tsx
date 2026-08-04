@@ -5,10 +5,11 @@ import { Environment, Text } from '@react-three/drei'
 import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
 import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import { createRunnerInput, setRunnerControl } from '../game/controls'
-import type { RunnerControl, RunnerInput } from '../game/controls'
+import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
+import type { RunnerControl, RunnerControlSources } from '../game/controls'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 import { playerPresentation } from '../game/player-lifecycle'
@@ -22,8 +23,8 @@ const ESCAPE_HEIGHT = 7.75
 const KEY_ART_URL = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/assets/hellbreak-key-art.webp`
 
 type RunnerControls = {
-  input: React.RefObject<RunnerInput>
-  jumpQueued: React.RefObject<boolean>
+  input: RefObject<RunnerControlSources>
+  jumpQueued: RefObject<boolean>
 }
 
 function useRunnerControls(controls: RunnerControls) {
@@ -35,7 +36,14 @@ function useRunnerControls(controls: RunnerControls) {
             : code === 'KeyD' || code === 'ArrowRight' ? 'right'
               : code === 'ShiftLeft' || code === 'ShiftRight' ? 'sprint'
                 : null
-      if (control) controls.input.current = setRunnerControl(controls.input.current, control, pressed)
+      if (control) {
+        controls.input.current = setRunnerControlSource(
+          controls.input.current,
+          control,
+          `keyboard:${code}`,
+          pressed,
+        )
+      }
       if (code === 'Space' && pressed && !repeat) controls.jumpQueued.current = true
     }
 
@@ -45,7 +53,7 @@ function useRunnerControls(controls: RunnerControls) {
     }
     const onKeyUp = (event: KeyboardEvent) => setKey(event.code, false)
     const clear = () => {
-      controls.input.current = createRunnerInput()
+      controls.input.current = createRunnerControlSources()
       controls.jumpQueued.current = false
     }
 
@@ -66,7 +74,7 @@ function GameCamera({
   elapsed,
   spectatorIndex,
 }: {
-  player: React.RefObject<RapierRigidBody | null>
+  player: RefObject<RapierRigidBody | null>
   mode: 'player' | 'spectator'
   elapsed: number
   spectatorIndex: number
@@ -105,7 +113,7 @@ function PlayerRunner({
   onDeath,
   onEscape,
 }: {
-  body: React.RefObject<RapierRigidBody | null>
+  body: RefObject<RapierRigidBody | null>
   active: boolean
   renderBody: boolean
   lavaHeight: number
@@ -138,7 +146,7 @@ function PlayerRunner({
 
     if (position.y > ESCAPE_HEIGHT) onEscape()
 
-    const input = controls.input.current
+    const input = readRunnerInput(controls.input.current)
     const velocity = movementVelocity(input, input.sprint ? SPRINT_SPEED : PLAYER_SPEED)
     const current = runner.linvel()
     runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
@@ -276,21 +284,26 @@ function GameScene(props: Parameters<typeof Tower>[0]) {
 }
 
 function MobileControls({ controls }: { controls: RunnerControls }) {
-  const holdProps = (control: RunnerControl) => ({
-    onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => {
-      event.currentTarget.setPointerCapture(event.pointerId)
-      controls.input.current = setRunnerControl(controls.input.current, control, true)
-    },
-    onPointerUp: () => {
-      controls.input.current = setRunnerControl(controls.input.current, control, false)
-    },
-    onPointerCancel: () => {
-      controls.input.current = setRunnerControl(controls.input.current, control, false)
-    },
-    onLostPointerCapture: () => {
-      controls.input.current = setRunnerControl(controls.input.current, control, false)
-    },
-  })
+  const holdProps = (control: RunnerControl) => {
+    const setPointer = (event: ReactPointerEvent<HTMLButtonElement>, pressed: boolean) => {
+      controls.input.current = setRunnerControlSource(
+        controls.input.current,
+        control,
+        `pointer:${event.pointerId}`,
+        pressed,
+      )
+    }
+
+    return {
+      onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+        event.currentTarget.setPointerCapture(event.pointerId)
+        setPointer(event, true)
+      },
+      onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => setPointer(event, false),
+      onPointerCancel: (event: ReactPointerEvent<HTMLButtonElement>) => setPointer(event, false),
+      onLostPointerCapture: (event: ReactPointerEvent<HTMLButtonElement>) => setPointer(event, false),
+    }
+  }
 
   return (
     <div className="mobile-controls" aria-label="모바일 게임 조작">
@@ -332,7 +345,7 @@ export default function HellbreakGame() {
   const [resetToken, setResetToken] = useState(0)
   const [spectating, setSpectating] = useState(false)
   const [spectatorIndex, setSpectatorIndex] = useState(0)
-  const input = useRef<RunnerInput>(createRunnerInput())
+  const input = useRef<RunnerControlSources>(createRunnerControlSources())
   const jumpQueued = useRef(false)
   const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued }), [])
 
@@ -364,7 +377,7 @@ export default function HellbreakGame() {
   }, [spectating])
 
   const startMatch = () => {
-    controls.input.current = createRunnerInput()
+    controls.input.current = createRunnerControlSources()
     controls.jumpQueued.current = false
     setElapsed(0)
     setDeaths(0)

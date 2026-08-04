@@ -36,9 +36,12 @@ The transport-independent room simulation now lives in `src/server/room-simulati
 It already enforces the core Room Host boundary:
 
 - clients submit directional input plus a monotonically increasing sequence number;
+- the room derives player ownership from the authenticated connection session instead of accepting a client-supplied player ID;
 - clients cannot submit authoritative coordinates;
-- stale or replayed input is rejected;
+- stale, replayed, malformed, or non-boolean input is rejected;
 - diagonal movement and sprint speed are recalculated by the server;
+- server ticks are capped at 100 ms to prevent pause-induced teleportation;
+- each room is limited to six authenticated players and disconnects remove input ownership immediately;
 - room state advances only through the server tick function.
 
 The upcoming Colyseus adapter will translate room messages into these tested commands and broadcast the resulting snapshots. This keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
