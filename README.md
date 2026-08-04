@@ -33,8 +33,9 @@ Open `http://localhost:5173` after starting the development server.
 - Spacebar jump using Rapier collisions
 - Smooth third-person follow camera
 - Seventeen-step physical vertical tower
-- Continuously rising lava with fall/reset tracking
+- Continuously rising lava with elimination and spectator transition
 - Three staggered autonomous runner bots
+- Q/E spectator switching with bot-follow camera
 - Start, restart, escape, bot-win, and rematch loop
 
 ## MVP scope

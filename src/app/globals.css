@@ -41,6 +41,9 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
 .viewport canvas { position: absolute !important; inset: 0; }
 .scanline { pointer-events: none; position: absolute; inset: 0; opacity: .15; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.05) 4px); }
 .game-banner { position: absolute; top: 1.4rem; left: 50%; transform: translateX(-50%); padding: .55rem .85rem; border: 1px solid rgba(255, 116, 72, .35); background: rgba(9, 6, 13, .72); color: #ffb49c; backdrop-filter: blur(8px); font: 800 .65rem ui-monospace, monospace; letter-spacing: .12em; white-space: nowrap; }
+.spectator-controls { position: absolute; left: 50%; bottom: 3.5rem; display: flex; align-items: center; gap: .7rem; transform: translateX(-50%); padding: .5rem; border: 1px solid rgba(124, 247, 255, .28); background: rgba(7, 12, 18, .78); backdrop-filter: blur(8px); }
+.spectator-controls button { margin: 0; padding: .55rem .7rem; border-color: rgba(124, 247, 255, .45); color: #9befff; background: rgba(124, 247, 255, .06); font-size: .58rem; }
+.spectator-controls strong { min-width: 5.8rem; color: #e9fbff; text-align: center; font: 800 .62rem ui-monospace, monospace; letter-spacing: .1em; }
 .status { position: absolute; right: 1.5rem; bottom: 1.4rem; color: #7e6f79; font: 700 .62rem ui-monospace, monospace; letter-spacing: .1em; }
 .status i { display: inline-block; width: .5rem; height: .5rem; margin-right: .5rem; border-radius: 50%; background: #70ff9b; box-shadow: 0 0 10px #70ff9b; }
 

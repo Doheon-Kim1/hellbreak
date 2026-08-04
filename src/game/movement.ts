@@ -30,6 +30,11 @@ export function movementVelocity(input: MovementInput, speed: number): Horizonta
   }
 }
 
+export function cycleSpectatorIndex(current: number, direction: -1 | 1, runnerCount: number) {
+  if (runnerCount <= 0) return 0
+  return (current + direction + runnerCount) % runnerCount
+}
+
 export function botPoseAt(elapsedSeconds: number, index: number): BotPose {
   const localTime = Math.max(0, elapsedSeconds) + index * 3
   const progress = Math.min(1, localTime / 52)

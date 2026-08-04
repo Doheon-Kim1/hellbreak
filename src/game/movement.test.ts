@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { botPoseAt, movementVelocity } from './movement'
+import { botPoseAt, cycleSpectatorIndex, movementVelocity } from './movement'
 
 describe('runner movement rules', () => {
   it('normalizes diagonal input to the configured speed', () => {
@@ -17,6 +17,18 @@ describe('runner movement rules', () => {
     )
 
     expect(velocity).toEqual({ x: 0, z: 0 })
+  })
+})
+
+describe('spectator target selection', () => {
+  it('moves forward and wraps after the last runner', () => {
+    expect(cycleSpectatorIndex(1, 1, 3)).toBe(2)
+    expect(cycleSpectatorIndex(2, 1, 3)).toBe(0)
+  })
+
+  it('moves backward and wraps before the first runner', () => {
+    expect(cycleSpectatorIndex(1, -1, 3)).toBe(0)
+    expect(cycleSpectatorIndex(0, -1, 3)).toBe(2)
   })
 })
 

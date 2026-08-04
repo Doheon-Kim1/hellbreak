@@ -1,13 +1,14 @@
 'use client'
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import type { RootState } from '@react-three/fiber'
 import { Environment, Text } from '@react-three/drei'
 import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
 import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import { botPoseAt, movementVelocity } from '../game/movement'
+import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 
 const PLATFORM_COUNT = 17
@@ -76,14 +77,32 @@ function ThirdPersonCamera({ target }: { target: React.RefObject<RapierRigidBody
   return null
 }
 
+function SpectatorCamera({ elapsed, targetIndex }: { elapsed: number; targetIndex: number }) {
+  const { camera } = useThree()
+  const desired = useMemo(() => new Vector3(), [])
+  const lookAt = useMemo(() => new Vector3(), [])
+
+  useFrame((_state: RootState, delta: number) => {
+    const pose = botPoseAt(elapsed, targetIndex)
+    desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
+    camera.position.lerp(desired, 1 - Math.exp(-delta * 4.8))
+    lookAt.set(pose.x, pose.y + 0.55, pose.z)
+    camera.lookAt(lookAt)
+  })
+
+  return null
+}
+
 function PlayerRunner({
   active,
+  cameraActive,
   lavaHeight,
   resetToken,
   onDeath,
   onEscape,
 }: {
   active: boolean
+  cameraActive: boolean
   lavaHeight: number
   resetToken: number
   onDeath: () => void
@@ -102,20 +121,18 @@ function PlayerRunner({
 
   useFrame(() => {
     const runner = body.current
-    if (!runner) return
+    if (!runner || !active) return
     const position = runner.translation()
 
     if (position.y < lavaHeight + 0.35 && !deathCooldown.current) {
       deathCooldown.current = true
       onDeath()
-      runner.setTranslation(SPAWN, true)
+      runner.setTranslation({ x: 0, y: -50, z: 0 }, true)
       runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
-      window.setTimeout(() => { deathCooldown.current = false }, 700)
       return
     }
 
     if (position.y > 8.65) onEscape()
-    if (!active) return
 
     const velocity = movementVelocity(keys.current, PLAYER_SPEED)
     const current = runner.linvel()
@@ -149,7 +166,7 @@ function PlayerRunner({
         </mesh>
         <pointLight color="#b87cff" intensity={4} distance={3} />
       </RigidBody>
-      <ThirdPersonCamera target={body} />
+      {cameraActive && <ThirdPersonCamera target={body} />}
     </>
   )
 }
@@ -192,11 +209,13 @@ function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
   )
 }
 
-function Tower({ elapsed, lavaHeight, active, resetToken, onDeath, onEscape }: {
+function Tower({ elapsed, lavaHeight, active, resetToken, spectating, spectatorIndex, onDeath, onEscape }: {
   elapsed: number
   lavaHeight: number
   active: boolean
   resetToken: number
+  spectating: boolean
+  spectatorIndex: number
   onDeath: () => void
   onEscape: () => void
 }) {
@@ -232,8 +251,10 @@ function Tower({ elapsed, lavaHeight, active, resetToken, onDeath, onEscape }: {
         ESCAPE
       </Text>
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
+      {spectating && <SpectatorCamera elapsed={elapsed} targetIndex={spectatorIndex} />}
       <PlayerRunner
         active={active}
+        cameraActive={!spectating}
         lavaHeight={lavaHeight}
         resetToken={resetToken}
         onDeath={onDeath}
@@ -272,6 +293,8 @@ export default function HellbreakGame() {
   const [deaths, setDeaths] = useState(0)
   const [playerEscaped, setPlayerEscaped] = useState(false)
   const [resetToken, setResetToken] = useState(0)
+  const [spectating, setSpectating] = useState(false)
+  const [spectatorIndex, setSpectatorIndex] = useState(0)
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
@@ -284,10 +307,27 @@ export default function HellbreakGame() {
     return () => window.clearInterval(timer)
   }, [started, finished])
 
+  useEffect(() => {
+    if (!spectating) return
+    const switchRunner = (event: KeyboardEvent) => {
+      if (event.repeat) return
+      if (event.code === 'KeyQ') {
+        setSpectatorIndex((current: number) => cycleSpectatorIndex(current, -1, 3))
+      }
+      if (event.code === 'KeyE') {
+        setSpectatorIndex((current: number) => cycleSpectatorIndex(current, 1, 3))
+      }
+    }
+    window.addEventListener('keydown', switchRunner)
+    return () => window.removeEventListener('keydown', switchRunner)
+  }, [spectating])
+
   const startMatch = () => {
     setElapsed(0)
     setDeaths(0)
     setPlayerEscaped(false)
+    setSpectating(false)
+    setSpectatorIndex(0)
     setResetToken((value) => value + 1)
     setStarted(true)
   }
@@ -296,7 +336,9 @@ export default function HellbreakGame() {
     ? 'READY FOR BOT MATCH'
     : finished
       ? `${match.winner?.toUpperCase()} WIN · PRESS REMATCH`
-      : playerEscaped
+      : spectating
+        ? `SPECTATING RUNNER ${spectatorIndex + 1} · Q/E SWITCH`
+        : playerEscaped
         ? 'YOU ESCAPED'
         : 'CLIMB BEFORE THE LAVA'
 
@@ -312,8 +354,8 @@ export default function HellbreakGame() {
           <div><strong>{deaths}</strong><small>LAVA FALLS</small></div>
         </div>
         <p className="brief">
-          Race three autonomous runners to the exit. The lava rises continuously; falling resets
-          you to the lowest platform while the match clock keeps moving.
+          Race three autonomous runners to the exit. If the lava takes you, the match continues in
+          spectator mode—switch between surviving runners with Q and E.
         </p>
         <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
           {!started ? 'START BOT MATCH' : finished ? 'REMATCH' : 'RESTART MATCH'}
@@ -321,20 +363,36 @@ export default function HellbreakGame() {
         <ul>
           <li><kbd>WASD</kbd> move</li>
           <li><kbd>SPACE</kbd> jump</li>
-          <li><kbd>Q</kbd> soul echo next</li>
+          <li><kbd>Q / E</kbd> spectate after death</li>
         </ul>
       </section>
       <section className="viewport" aria-label="Playable 3D vertical prison bot match">
         <GameScene
           elapsed={elapsed}
           lavaHeight={match.lavaHeight}
-          active={started && !finished && !playerEscaped}
+          active={started && !finished && !playerEscaped && !spectating}
           resetToken={resetToken}
-          onDeath={() => setDeaths((value) => value + 1)}
+          spectating={spectating}
+          spectatorIndex={spectatorIndex}
+          onDeath={() => {
+            setDeaths((value: number) => value + 1)
+            setSpectating(true)
+          }}
           onEscape={() => setPlayerEscaped(true)}
         />
         <div className="scanline" />
         <div className="game-banner">{status}</div>
+        {spectating && !finished && (
+          <div className="spectator-controls" aria-label="Spectator controls">
+            <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, -1, 3))}>
+              Q · PREV
+            </button>
+            <strong>RUNNER {spectatorIndex + 1}</strong>
+            <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, 1, 3))}>
+              E · NEXT
+            </button>
+          </div>
+        )}
         <div className="status"><i /> NEXT.JS LOCAL GAME ONLINE</div>
       </section>
     </main>
