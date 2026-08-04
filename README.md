@@ -6,14 +6,13 @@ Browser-first 3D asymmetric multiplayer game for **OpenAI Game Builders Seoul 20
 
 ## MVP stack
 
-- React 19, TypeScript, Vite 8
+- Next.js 16 App Router, React 19, TypeScript
 - Three.js, React Three Fiber, Drei
-- Rapier physics
-- Zustand client state
-- Colyseus authoritative multiplayer server (next milestone)
+- Rapier physics and Zustand client state
+- Colyseus authoritative real-time game rooms
+- Com2uS HIVE for web authentication, matchmaking, leaderboard, chat, and analytics
 - Vitest unit tests and Playwright browser tests
-- Vercel static client deployment; dedicated WebSocket host for Colyseus
-- Supabase later for accounts, match history, and analytics—not authoritative gameplay
+- Vercel for the Next.js app; dedicated WebSocket host for Colyseus
 
 ## Commands
 
@@ -21,11 +20,12 @@ Browser-first 3D asymmetric multiplayer game for **OpenAI Game Builders Seoul 20
 npm install
 npm run dev
 npm test
+npm run lint
 npm run build
-npm run preview
+npm start
 ```
 
-Open `http://localhost:5173` after starting the dev server.
+Open `http://localhost:5173` after starting the development server.
 
 ## MVP scope
 
@@ -36,6 +36,12 @@ Open `http://localhost:5173` after starting the dev server.
 5. Three seals, final escape door, four-minute match, instant rematch
 6. Local bot match first; authoritative online room second
 
-## Architecture rule
+## Backend boundaries
 
-The client renders and predicts movement. The Colyseus server owns match time, lava height, captures, seals, and victory. Never use Supabase database events as the frame-by-frame game transport.
+- **Next.js:** web UI, secure HIVE server-side integration routes, session bootstrap
+- **HIVE:** identity/token verification, matchmaking ticketing, leaderboard, chat, analytics
+- **Colyseus:** authoritative match clock, movement validation, lava, captures, seals, victory
+
+HIVE matchmaking chooses or allocates a room, but HIVE database/API events are not used as the frame-by-frame transport. The browser connects directly to the allocated Colyseus WebSocket room after its HIVE token is verified server-side.
+
+See [`docs/architecture.md`](docs/architecture.md) for the integration flow.

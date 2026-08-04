@@ -1,9 +1,10 @@
+'use client'
+
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Environment, Float, Text } from '@react-three/drei'
 import { Physics, RigidBody } from '@react-three/rapier'
 import { useMemo, useRef } from 'react'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import './App.css'
 
 const PLATFORM_COUNT = 16
 
