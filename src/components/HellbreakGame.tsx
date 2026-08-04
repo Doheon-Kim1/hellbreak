@@ -1,7 +1,6 @@
 'use client'
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Environment, Text } from '@react-three/drei'
 import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
 import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -12,7 +11,7 @@ import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } f
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
-import { playerPresentation } from '../game/player-lifecycle'
+import { playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import { GiantPlayground } from './GiantPlayground'
 
 const PLAYER_SPEED = 5.8
@@ -242,9 +241,6 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
         <torusGeometry args={[1.5, 0.28, 16, 48]} />
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
       </mesh>
-      <Text position={[-10, 10.15, 2]} fontSize={0.7} color="#ffd7a0" anchorX="center">
-        탈출구
-      </Text>
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
       <GameCamera
         player={playerBody}
@@ -267,18 +263,35 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
   )
 }
 
-function GameScene(props: Parameters<typeof Tower>[0]) {
+function SceneReady({ onReady }: { onReady: () => void }) {
+  const reported = useRef(false)
+
+  useFrame(() => {
+    if (reported.current) return
+    reported.current = true
+    onReady()
+  })
+
+  return null
+}
+
+function GameScene({ onReady, ...props }: Parameters<typeof Tower>[0] & { onReady: () => void }) {
   return (
-    <Canvas camera={{ position: [7, 3, 8], fov: 48 }} shadows>
+    <Canvas
+      camera={{ position: [7, 3, 8], fov: 48 }}
+      dpr={[1, 1.5]}
+      gl={{ antialias: false, powerPreference: 'high-performance' }}
+      fallback={<div className="canvas-fallback">이 기기에서 3D 화면을 시작할 수 없습니다.</div>}
+    >
       <color attach="background" args={['#09060d']} />
       <fog attach="fog" args={['#160911', 35, 105]} />
-      <ambientLight intensity={0.45} />
-      <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" castShadow />
+      <ambientLight intensity={0.8} />
+      <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
       <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
       <Physics gravity={[0, -18, 0]}>
+        <SceneReady onReady={onReady} />
         <Tower {...props} />
       </Physics>
-      <Environment preset="night" />
     </Canvas>
   )
 }
@@ -339,6 +352,7 @@ function formatTime(seconds: number) {
 
 export default function HellbreakGame() {
   const [started, setStarted] = useState(false)
+  const [sceneReady, setSceneReady] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [deaths, setDeaths] = useState(0)
   const [playerEscaped, setPlayerEscaped] = useState(false)
@@ -390,7 +404,9 @@ export default function HellbreakGame() {
 
   const status = !started
     ? '봇 경기를 시작하세요'
-    : finished
+    : !sceneReady
+      ? '3D 무대 준비 중…'
+      : finished
       ? `${winnerLabel} 승리 · 다시 경기를 시작하세요`
       : spectating
         ? `도망자 ${spectatorIndex + 1} 관전 중 · Q/E로 변경`
@@ -438,8 +454,9 @@ export default function HellbreakGame() {
             setSpectating(true)
           }}
           onEscape={() => setPlayerEscaped(true)}
+          onReady={() => setSceneReady(true)}
         />
-        {!started && (
+        {sceneCoverVisible(started, sceneReady) && (
           <div
             className="key-art"
             style={{ backgroundImage: `url(${KEY_ART_URL})` }}

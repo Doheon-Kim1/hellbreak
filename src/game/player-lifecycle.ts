@@ -10,6 +10,10 @@ export interface PlayerPresentation {
   cameraMode: GameCameraMode
 }
 
+export function sceneCoverVisible(started: boolean, sceneReady: boolean): boolean {
+  return !started || !sceneReady
+}
+
 export function playerPresentation({
   spectating,
   escaped,

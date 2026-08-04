@@ -39,6 +39,7 @@ ul { display: flex; gap: 1.1rem; padding: 0; margin: 1.5rem 0 0; list-style: non
 kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
 .viewport { position: relative; min-height: 100vh; }
 .viewport canvas { position: absolute !important; inset: 0; }
+.canvas-fallback { position: absolute; z-index: 4; inset: 0; display: grid; place-items: center; padding: 2rem; background: #09060d; color: #ffb49c; text-align: center; font: 800 .75rem ui-monospace, monospace; }
 .key-art { position: absolute; z-index: 1; inset: 0; background-color: #09060d; background-position: center; background-size: cover; background-repeat: no-repeat; }
 .scanline { pointer-events: none; z-index: 2; position: absolute; inset: 0; opacity: .15; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.05) 4px); }
 .game-banner { z-index: 3; position: absolute; top: 1.4rem; left: 50%; transform: translateX(-50%); padding: .55rem .85rem; border: 1px solid rgba(255, 116, 72, .35); background: rgba(9, 6, 13, .72); color: #ffb49c; backdrop-filter: blur(8px); font: 800 .65rem ui-monospace, monospace; letter-spacing: .12em; white-space: nowrap; }

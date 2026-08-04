@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { playerPresentation } from './player-lifecycle'
+import { playerPresentation, sceneCoverVisible } from './player-lifecycle'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
 
 describe('runner movement rules', () => {
@@ -39,6 +39,12 @@ describe('player death presentation', () => {
       renderBody: false,
       cameraMode: 'spectator',
     })
+  })
+
+  it('keeps the local key art visible before play and until the 3D scene renders a frame', () => {
+    expect(sceneCoverVisible(false, true)).toBe(true)
+    expect(sceneCoverVisible(true, false)).toBe(true)
+    expect(sceneCoverVisible(true, true)).toBe(false)
   })
 })
 
