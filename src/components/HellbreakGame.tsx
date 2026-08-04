@@ -7,6 +7,8 @@ import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
+import { createRunnerInput, setRunnerControl } from '../game/controls'
+import type { RunnerControl, RunnerInput } from '../game/controls'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 import { playerPresentation } from '../game/player-lifecycle'
@@ -17,27 +19,24 @@ const SPRINT_SPEED = 8.2
 const JUMP_SPEED = 7.4
 const SPAWN = { x: -26, y: -2.2, z: 22 }
 const ESCAPE_HEIGHT = 7.75
+const KEY_ART_URL = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/assets/hellbreak-key-art.webp`
 
-type KeyState = {
-  forward: boolean
-  backward: boolean
-  left: boolean
-  right: boolean
-  sprint: boolean
+type RunnerControls = {
+  input: React.RefObject<RunnerInput>
+  jumpQueued: React.RefObject<boolean>
 }
 
-function useRunnerControls() {
-  const keys = useRef<KeyState>({ forward: false, backward: false, left: false, right: false, sprint: false })
-  const jumpQueued = useRef(false)
-
+function useRunnerControls(controls: RunnerControls) {
   useEffect(() => {
     const setKey = (code: string, pressed: boolean, repeat = false) => {
-      if (code === 'KeyW' || code === 'ArrowUp') keys.current.forward = pressed
-      if (code === 'KeyS' || code === 'ArrowDown') keys.current.backward = pressed
-      if (code === 'KeyA' || code === 'ArrowLeft') keys.current.left = pressed
-      if (code === 'KeyD' || code === 'ArrowRight') keys.current.right = pressed
-      if (code === 'ShiftLeft' || code === 'ShiftRight') keys.current.sprint = pressed
-      if (code === 'Space' && pressed && !repeat) jumpQueued.current = true
+      const control: RunnerControl | null = code === 'KeyW' || code === 'ArrowUp' ? 'forward'
+        : code === 'KeyS' || code === 'ArrowDown' ? 'backward'
+          : code === 'KeyA' || code === 'ArrowLeft' ? 'left'
+            : code === 'KeyD' || code === 'ArrowRight' ? 'right'
+              : code === 'ShiftLeft' || code === 'ShiftRight' ? 'sprint'
+                : null
+      if (control) controls.input.current = setRunnerControl(controls.input.current, control, pressed)
+      if (code === 'Space' && pressed && !repeat) controls.jumpQueued.current = true
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -46,8 +45,8 @@ function useRunnerControls() {
     }
     const onKeyUp = (event: KeyboardEvent) => setKey(event.code, false)
     const clear = () => {
-      keys.current = { forward: false, backward: false, left: false, right: false, sprint: false }
-      jumpQueued.current = false
+      controls.input.current = createRunnerInput()
+      controls.jumpQueued.current = false
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -58,9 +57,7 @@ function useRunnerControls() {
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', clear)
     }
-  }, [])
-
-  return { keys, jumpQueued }
+  }, [controls])
 }
 
 function GameCamera({
@@ -104,6 +101,7 @@ function PlayerRunner({
   renderBody,
   lavaHeight,
   resetToken,
+  controls,
   onDeath,
   onEscape,
 }: {
@@ -112,12 +110,13 @@ function PlayerRunner({
   renderBody: boolean
   lavaHeight: number
   resetToken: number
+  controls: RunnerControls
   onDeath: () => void
   onEscape: () => void
 }) {
   const grounded = useRef(false)
   const deathCooldown = useRef(false)
-  const { keys, jumpQueued } = useRunnerControls()
+  useRunnerControls(controls)
 
   useEffect(() => {
     body.current?.setTranslation(SPAWN, true)
@@ -139,16 +138,17 @@ function PlayerRunner({
 
     if (position.y > ESCAPE_HEIGHT) onEscape()
 
-    const velocity = movementVelocity(keys.current, keys.current.sprint ? SPRINT_SPEED : PLAYER_SPEED)
+    const input = controls.input.current
+    const velocity = movementVelocity(input, input.sprint ? SPRINT_SPEED : PLAYER_SPEED)
     const current = runner.linvel()
     runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
 
-    if (jumpQueued.current) {
+    if (controls.jumpQueued.current) {
       if (grounded.current) {
         runner.setLinvel({ x: velocity.x, y: JUMP_SPEED, z: velocity.z }, true)
         grounded.current = false
       }
-      jumpQueued.current = false
+      controls.jumpQueued.current = false
     }
   })
 
@@ -213,12 +213,13 @@ function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
   )
 }
 
-function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, spectating, spectatorIndex, onDeath, onEscape }: {
+function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, controls, spectating, spectatorIndex, onDeath, onEscape }: {
   elapsed: number
   lavaHeight: number
   active: boolean
   playerEscaped: boolean
   resetToken: number
+  controls: RunnerControls
   spectating: boolean
   spectatorIndex: number
   onDeath: () => void
@@ -249,6 +250,7 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, spectat
         renderBody={presentation.renderBody}
         lavaHeight={lavaHeight}
         resetToken={resetToken}
+        controls={controls}
         onDeath={onDeath}
         onEscape={onEscape}
       />
@@ -273,6 +275,49 @@ function GameScene(props: Parameters<typeof Tower>[0]) {
   )
 }
 
+function MobileControls({ controls }: { controls: RunnerControls }) {
+  const holdProps = (control: RunnerControl) => ({
+    onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.currentTarget.setPointerCapture(event.pointerId)
+      controls.input.current = setRunnerControl(controls.input.current, control, true)
+    },
+    onPointerUp: () => {
+      controls.input.current = setRunnerControl(controls.input.current, control, false)
+    },
+    onPointerCancel: () => {
+      controls.input.current = setRunnerControl(controls.input.current, control, false)
+    },
+    onLostPointerCapture: () => {
+      controls.input.current = setRunnerControl(controls.input.current, control, false)
+    },
+  })
+
+  return (
+    <div className="mobile-controls" aria-label="모바일 게임 조작">
+      <div className="mobile-dpad">
+        <button type="button" aria-label="앞으로 이동" className="up" {...holdProps('forward')}>▲</button>
+        <button type="button" aria-label="왼쪽 이동" className="left" {...holdProps('left')}>◀</button>
+        <button type="button" aria-label="뒤로 이동" className="down" {...holdProps('backward')}>▼</button>
+        <button type="button" aria-label="오른쪽 이동" className="right" {...holdProps('right')}>▶</button>
+      </div>
+      <div className="mobile-actions">
+        <button type="button" aria-label="달리기" {...holdProps('sprint')}>달리기</button>
+        <button
+          type="button"
+          aria-label="점프"
+          className="jump"
+          onPointerDown={(event) => {
+            event.preventDefault()
+            controls.jumpQueued.current = true
+          }}
+        >
+          점프
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function formatTime(seconds: number) {
   const remaining = Math.max(0, Math.ceil(180 - seconds))
   const minutes = Math.floor(remaining / 60)
@@ -287,6 +332,9 @@ export default function HellbreakGame() {
   const [resetToken, setResetToken] = useState(0)
   const [spectating, setSpectating] = useState(false)
   const [spectatorIndex, setSpectatorIndex] = useState(0)
+  const input = useRef<RunnerInput>(createRunnerInput())
+  const jumpQueued = useRef(false)
+  const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued }), [])
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
@@ -316,6 +364,8 @@ export default function HellbreakGame() {
   }, [spectating])
 
   const startMatch = () => {
+    controls.input.current = createRunnerInput()
+    controls.jumpQueued.current = false
     setElapsed(0)
     setDeaths(0)
     setPlayerEscaped(false)
@@ -336,7 +386,7 @@ export default function HellbreakGame() {
         : '거대한 놀이터를 건너 탈출대로 올라가세요'
 
   return (
-    <main className="shell">
+    <main className={`shell${started && !finished ? ' playing' : ''}`}>
       <section className="hud" aria-label="게임 정보와 조작법">
         <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.2</div>
         <h1>HELL<span>BREAK</span></h1>
@@ -367,6 +417,7 @@ export default function HellbreakGame() {
           active={started && !finished && !playerEscaped && !spectating}
           playerEscaped={playerEscaped}
           resetToken={resetToken}
+          controls={controls}
           spectating={spectating}
           spectatorIndex={spectatorIndex}
           onDeath={() => {
@@ -375,6 +426,14 @@ export default function HellbreakGame() {
           }}
           onEscape={() => setPlayerEscaped(true)}
         />
+        {!started && (
+          <div
+            className="key-art"
+            style={{ backgroundImage: `url(${KEY_ART_URL})` }}
+            role="img"
+            aria-label="거대한 지옥 놀이터와 상승하는 용암을 피해 달리는 도망자 키아트"
+          />
+        )}
         <div className="scanline" />
         <div className="game-banner">{status}</div>
         {spectating && !finished && (
@@ -387,6 +446,9 @@ export default function HellbreakGame() {
               E · 다음
             </button>
           </div>
+        )}
+        {started && !finished && !playerEscaped && !spectating && (
+          <MobileControls controls={controls} />
         )}
         <div className="status"><i /> NEXT.JS 로컬 게임 실행 중</div>
       </section>

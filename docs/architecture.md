@@ -30,6 +30,19 @@
 - Treat all client movement and ability commands as untrusted input.
 - Do not commit provider credentials; inject them through deployment environment variables.
 
+## Implemented authoritative foundation
+
+The transport-independent room simulation now lives in `src/server/room-simulation.ts`.
+It already enforces the core Room Host boundary:
+
+- clients submit directional input plus a monotonically increasing sequence number;
+- clients cannot submit authoritative coordinates;
+- stale or replayed input is rejected;
+- diagonal movement and sprint speed are recalculated by the server;
+- room state advances only through the server tick function.
+
+The upcoming Colyseus adapter will translate room messages into these tested commands and broadcast the resulting snapshots. This keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
+
 ## MVP rollout
 
 The bot-playable local match does not require HIVE credentials. HIVE integration starts when the HIVE app ID, server API access, and custom web login configuration are available.
