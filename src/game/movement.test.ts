@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { playerPresentation, sceneCoverVisible } from './player-lifecycle'
+import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from './player-lifecycle'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
 
 describe('runner movement rules', () => {
@@ -45,6 +45,11 @@ describe('player death presentation', () => {
     expect(sceneCoverVisible(false, true)).toBe(true)
     expect(sceneCoverVisible(true, false)).toBe(true)
     expect(sceneCoverVisible(true, true)).toBe(false)
+  })
+
+  it('accepts a rendered frame only when sampled pixels contain visible variation', () => {
+    expect(frameHasVisibleScene([[9, 6, 13], [9, 6, 13], [9, 6, 13]])).toBe(false)
+    expect(frameHasVisibleScene([[9, 6, 13], [220, 80, 30], [25, 32, 50]])).toBe(true)
   })
 })
 

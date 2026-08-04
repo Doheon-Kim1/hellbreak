@@ -1,17 +1,18 @@
 'use client'
 
-import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber'
 import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
 import type { RapierRigidBody } from '@react-three/rapier'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
 import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
-import { playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
+import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
+import type { FramePixelSample } from '../game/player-lifecycle'
 import { GiantPlayground } from './GiantPlayground'
 
 const PLAYER_SPEED = 5.8
@@ -263,25 +264,119 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
   )
 }
 
-function SceneReady({ onReady }: { onReady: () => void }) {
-  const reported = useRef(false)
+class SceneErrorBoundary extends Component<
+  { children: ReactNode; onError: (message: string) => void },
+  { failed: boolean }
+> {
+  state = { failed: false }
 
-  useFrame(() => {
-    if (reported.current) return
-    reported.current = true
-    onReady()
-  })
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch() {
+    this.props.onError('3D 엔진 초기화에 실패했습니다.')
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children
+  }
+}
+
+function SceneHealth({
+  onReady,
+  onFailure,
+}: {
+  onReady: () => void
+  onFailure: (message: string) => void
+}) {
+  const renderer = useThree((state) => state.gl)
+  const readyCallback = useRef(onReady)
+  const failureCallback = useRef(onFailure)
+  readyCallback.current = onReady
+  failureCallback.current = onFailure
+
+  useEffect(() => {
+    const canvas = renderer.domElement
+    const context = renderer.getContext()
+    const pixel = new Uint8Array(4)
+    let observedFrames = 0
+    let readyReported = false
+    let failed = false
+
+    const fail = (message: string) => {
+      if (failed) return
+      failed = true
+      failureCallback.current(message)
+    }
+    const handleContextLost = (event: Event) => {
+      event.preventDefault()
+      fail('WebGL 연결이 끊어졌습니다. 페이지를 다시 불러와 주세요.')
+    }
+
+    canvas.addEventListener('webglcontextlost', handleContextLost)
+    // R3F runs after-effects after renderer.render(), so sparse readback verifies visible output rather than mere component mount.
+    const unsubscribe = addAfterEffect(() => {
+      if (failed || readyReported) return
+      if (context.isContextLost()) {
+        fail('WebGL 연결이 끊어졌습니다. 페이지를 다시 불러와 주세요.')
+        return
+      }
+
+      const { width, height } = canvas
+      if (width < 2 || height < 2) return
+      observedFrames += 1
+      if (observedFrames % 4 !== 0) return
+
+      const samples: FramePixelSample[] = []
+      try {
+        for (const vertical of [0.15, 0.35, 0.55, 0.75, 0.9]) {
+          for (const horizontal of [0.12, 0.3, 0.5, 0.7, 0.88]) {
+            context.readPixels(
+              Math.min(width - 1, Math.floor(width * horizontal)),
+              Math.min(height - 1, Math.floor(height * vertical)),
+              1,
+              1,
+              context.RGBA,
+              context.UNSIGNED_BYTE,
+              pixel,
+            )
+            samples.push([pixel[0], pixel[1], pixel[2]])
+          }
+        }
+      } catch {
+        fail('3D 화면의 출력 상태를 확인할 수 없습니다.')
+        return
+      }
+
+      if (frameHasVisibleScene(samples)) {
+        readyReported = true
+        readyCallback.current()
+      } else if (observedFrames >= 120) {
+        fail('3D 장면이 검은 화면으로 감지됐습니다.')
+      }
+    })
+
+    return () => {
+      failed = true
+      unsubscribe()
+      canvas.removeEventListener('webglcontextlost', handleContextLost)
+    }
+  }, [renderer])
 
   return null
 }
 
-function GameScene({ onReady, ...props }: Parameters<typeof Tower>[0] & { onReady: () => void }) {
+function GameScene({
+  onReady,
+  onFailure,
+  ...props
+}: Parameters<typeof Tower>[0] & { onReady: () => void; onFailure: (message: string) => void }) {
   return (
     <Canvas
       camera={{ position: [7, 3, 8], fov: 48 }}
       dpr={[1, 1.5]}
       gl={{ antialias: false, powerPreference: 'high-performance' }}
-      fallback={<div className="canvas-fallback">이 기기에서 3D 화면을 시작할 수 없습니다.</div>}
     >
       <color attach="background" args={['#09060d']} />
       <fog attach="fog" args={['#160911', 35, 105]} />
@@ -289,7 +384,7 @@ function GameScene({ onReady, ...props }: Parameters<typeof Tower>[0] & { onRead
       <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
       <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
       <Physics gravity={[0, -18, 0]}>
-        <SceneReady onReady={onReady} />
+        <SceneHealth onReady={onReady} onFailure={onFailure} />
         <Tower {...props} />
       </Physics>
     </Canvas>
@@ -353,6 +448,7 @@ function formatTime(seconds: number) {
 export default function HellbreakGame() {
   const [started, setStarted] = useState(false)
   const [sceneReady, setSceneReady] = useState(false)
+  const [sceneError, setSceneError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const [deaths, setDeaths] = useState(0)
   const [playerEscaped, setPlayerEscaped] = useState(false)
@@ -370,10 +466,19 @@ export default function HellbreakGame() {
   const winnerLabel = match.winner === 'runners' ? '도망자' : '지옥 간수'
 
   useEffect(() => {
-    if (!started || finished) return
+    if (!started || !sceneReady || sceneError || finished) return
     const timer = window.setInterval(() => setElapsed((value) => Math.min(180, value + 0.1)), 100)
     return () => window.clearInterval(timer)
-  }, [started, finished])
+  }, [started, sceneReady, sceneError, finished])
+
+  useEffect(() => {
+    if (!started || sceneReady || sceneError) return
+    const timeout = window.setTimeout(
+      () => setSceneError('3D 엔진이 응답하지 않습니다. 페이지를 다시 불러와 주세요.'),
+      8000,
+    )
+    return () => window.clearTimeout(timeout)
+  }, [started, sceneReady, sceneError])
 
   useEffect(() => {
     if (!spectating) return
@@ -402,11 +507,18 @@ export default function HellbreakGame() {
     setStarted(true)
   }
 
+  const handleSceneFailure = (message: string) => {
+    setSceneReady(false)
+    setSceneError(message)
+  }
+
   const status = !started
     ? '봇 경기를 시작하세요'
-    : !sceneReady
-      ? '3D 무대 준비 중…'
-      : finished
+    : sceneError
+      ? '3D 화면 오류 · 다시 불러오기가 필요합니다'
+      : !sceneReady
+        ? '3D 무대 준비 중…'
+        : finished
       ? `${winnerLabel} 승리 · 다시 경기를 시작하세요`
       : spectating
         ? `도망자 ${spectatorIndex + 1} 관전 중 · Q/E로 변경`
@@ -440,22 +552,30 @@ export default function HellbreakGame() {
         </ul>
       </section>
       <section className="viewport" aria-label="플레이 가능한 거대 놀이터 3D 봇 경기">
-        <GameScene
-          elapsed={elapsed}
-          lavaHeight={match.lavaHeight}
-          active={started && !finished && !playerEscaped && !spectating}
-          playerEscaped={playerEscaped}
-          resetToken={resetToken}
-          controls={controls}
-          spectating={spectating}
-          spectatorIndex={spectatorIndex}
-          onDeath={() => {
-            setDeaths((value: number) => value + 1)
-            setSpectating(true)
-          }}
-          onEscape={() => setPlayerEscaped(true)}
-          onReady={() => setSceneReady(true)}
-        />
+        {!sceneError && (
+          <SceneErrorBoundary onError={handleSceneFailure}>
+            <GameScene
+              elapsed={elapsed}
+              lavaHeight={match.lavaHeight}
+              active={started && sceneReady && !finished && !playerEscaped && !spectating}
+              playerEscaped={playerEscaped}
+              resetToken={resetToken}
+              controls={controls}
+              spectating={spectating}
+              spectatorIndex={spectatorIndex}
+              onDeath={() => {
+                setDeaths((value: number) => value + 1)
+                setSpectating(true)
+              }}
+              onEscape={() => setPlayerEscaped(true)}
+              onReady={() => {
+                setSceneReady(true)
+                setSceneError(null)
+              }}
+              onFailure={handleSceneFailure}
+            />
+          </SceneErrorBoundary>
+        )}
         {sceneCoverVisible(started, sceneReady) && (
           <div
             className="key-art"
@@ -463,6 +583,13 @@ export default function HellbreakGame() {
             role="img"
             aria-label="거대한 지옥 놀이터와 상승하는 용암을 피해 달리는 도망자 키아트"
           />
+        )}
+        {sceneError && (
+          <div className="scene-error" role="alert">
+            <strong>3D 화면을 시작하지 못했습니다</strong>
+            <p>{sceneError}</p>
+            <button type="button" onClick={() => window.location.reload()}>다시 불러오기</button>
+          </div>
         )}
         <div className="scanline" />
         <div className="game-banner">{status}</div>
@@ -477,7 +604,7 @@ export default function HellbreakGame() {
             </button>
           </div>
         )}
-        {started && !finished && !playerEscaped && !spectating && (
+        {started && sceneReady && !finished && !playerEscaped && !spectating && (
           <MobileControls controls={controls} />
         )}
         <div className="status"><i /> NEXT.JS 로컬 게임 실행 중</div>
