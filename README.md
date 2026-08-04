@@ -27,6 +27,16 @@ npm start
 
 Open `http://localhost:5173` after starting the development server.
 
+## Current playable slice
+
+- WASD/arrow-key runner movement with normalized diagonal speed
+- Spacebar jump using Rapier collisions
+- Smooth third-person follow camera
+- Seventeen-step physical vertical tower
+- Continuously rising lava with fall/reset tracking
+- Three staggered autonomous runner bots
+- Start, restart, escape, bot-win, and rematch loop
+
 ## MVP scope
 
 1. One vertical prison map and rising lava
@@ -44,4 +54,4 @@ Open `http://localhost:5173` after starting the development server.
 
 HIVE matchmaking chooses or allocates a room, but HIVE database/API events are not used as the frame-by-frame transport. The browser connects directly to the allocated Colyseus WebSocket room after its HIVE token is verified server-side.
 
-See [`docs/architecture.md`](docs/architecture.md) for the integration flow.
+See [`docs/architecture.md`](docs/architecture.md) for the integration flow and [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md) for the ephemeral dependency/cache policy.

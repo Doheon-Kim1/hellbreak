@@ -47,7 +47,7 @@ export function stepMatch(state: MatchState, deltaSeconds: number): MatchState {
   return {
     ...state,
     elapsedSeconds,
-    lavaHeight: -4 + progress * 28,
+    lavaHeight: -4 + progress * 13.5,
     openTier,
     phase: elapsedSeconds >= state.durationSeconds ? 'final-escape' : 'running',
   }

@@ -19,6 +19,7 @@ describe('HELLBREAK match rules', () => {
 
     expect(finalPhase.phase).toBe('final-escape')
     expect(finalPhase.openTier).toBe(3)
+    expect(finalPhase.lavaHeight).toBeCloseTo(9.5)
   })
 
   it('awards runners a win when at least one runner escapes', () => {

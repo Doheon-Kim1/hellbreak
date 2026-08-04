@@ -32,12 +32,15 @@ h1 span { display: block; color: #ff4a1c; text-shadow: 0 0 40px rgba(255, 63, 18
 .match-card strong, .match-card small { display: block; }
 .match-card strong { color: #ffbea9; font: 800 1.15rem/1.2 ui-monospace, monospace; }
 .match-card small { margin-top: .25rem; color: #74656f; font-size: .58rem; letter-spacing: .12em; }
-button { width: fit-content; margin-top: 1.7rem; padding: .9rem 1.2rem; border: 1px solid #ff4a1c; color: #ff9f80; background: rgba(255, 74, 28, .08); font: 800 .72rem ui-monospace, monospace; letter-spacing: .1em; }
+button { width: fit-content; margin-top: 1.7rem; padding: .9rem 1.2rem; border: 1px solid #ff4a1c; color: #ff9f80; background: rgba(255, 74, 28, .08); font: 800 .72rem ui-monospace, monospace; letter-spacing: .1em; cursor: pointer; transition: background .2s ease, box-shadow .2s ease; }
+button:hover, button:focus-visible { background: rgba(255, 74, 28, .2); box-shadow: 0 0 25px rgba(255, 74, 28, .2); }
+button.active-match { border-color: #9d6555; color: #a98579; }
 ul { display: flex; gap: 1.1rem; padding: 0; margin: 1.5rem 0 0; list-style: none; color: #716773; font-size: .67rem; }
 kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
 .viewport { position: relative; min-height: 100vh; }
 .viewport canvas { position: absolute !important; inset: 0; }
 .scanline { pointer-events: none; position: absolute; inset: 0; opacity: .15; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.05) 4px); }
+.game-banner { position: absolute; top: 1.4rem; left: 50%; transform: translateX(-50%); padding: .55rem .85rem; border: 1px solid rgba(255, 116, 72, .35); background: rgba(9, 6, 13, .72); color: #ffb49c; backdrop-filter: blur(8px); font: 800 .65rem ui-monospace, monospace; letter-spacing: .12em; white-space: nowrap; }
 .status { position: absolute; right: 1.5rem; bottom: 1.4rem; color: #7e6f79; font: 700 .62rem ui-monospace, monospace; letter-spacing: .1em; }
 .status i { display: inline-block; width: .5rem; height: .5rem; margin-right: .5rem; border-radius: 50%; background: #70ff9b; box-shadow: 0 0 10px #70ff9b; }
 

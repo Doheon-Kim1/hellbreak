@@ -1,126 +1,341 @@
 'use client'
 
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Environment, Float, Text } from '@react-three/drei'
-import { Physics, RigidBody } from '@react-three/rapier'
-import { useMemo, useRef } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { Environment, Text } from '@react-three/drei'
+import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
+import type { RapierRigidBody } from '@react-three/rapier'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
+import { botPoseAt, movementVelocity } from '../game/movement'
+import { createMatch, stepMatch } from '../game/match'
 
-const PLATFORM_COUNT = 16
+const PLATFORM_COUNT = 17
+const PLAYER_SPEED = 5.8
+const JUMP_SPEED = 7.4
+const SPAWN = { x: 0, y: -2.2, z: 0 }
 
-function Lava() {
+type KeyState = {
+  forward: boolean
+  backward: boolean
+  left: boolean
+  right: boolean
+}
+
+function useRunnerControls() {
+  const keys = useRef<KeyState>({ forward: false, backward: false, left: false, right: false })
+  const jumpQueued = useRef(false)
+
+  useEffect(() => {
+    const setKey = (code: string, pressed: boolean, repeat = false) => {
+      if (code === 'KeyW' || code === 'ArrowUp') keys.current.forward = pressed
+      if (code === 'KeyS' || code === 'ArrowDown') keys.current.backward = pressed
+      if (code === 'KeyA' || code === 'ArrowLeft') keys.current.left = pressed
+      if (code === 'KeyD' || code === 'ArrowRight') keys.current.right = pressed
+      if (code === 'Space' && pressed && !repeat) jumpQueued.current = true
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code === 'Space' || event.code.startsWith('Arrow')) event.preventDefault()
+      setKey(event.code, true, event.repeat)
+    }
+    const onKeyUp = (event: KeyboardEvent) => setKey(event.code, false)
+    const clear = () => {
+      keys.current = { forward: false, backward: false, left: false, right: false }
+      jumpQueued.current = false
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', clear)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', clear)
+    }
+  }, [])
+
+  return { keys, jumpQueued }
+}
+
+function ThirdPersonCamera({ target }: { target: React.RefObject<RapierRigidBody | null> }) {
+  const { camera } = useThree()
+  const desired = useMemo(() => new Vector3(), [])
+  const lookAt = useMemo(() => new Vector3(), [])
+
+  useFrame((_, delta) => {
+    const body = target.current
+    if (!body) return
+    const position = body.translation()
+    desired.set(position.x + 6.8, position.y + 4.2, position.z + 7.6)
+    camera.position.lerp(desired, 1 - Math.exp(-delta * 5.5))
+    lookAt.set(position.x, position.y + 0.75, position.z)
+    camera.lookAt(lookAt)
+  })
+
+  return null
+}
+
+function PlayerRunner({
+  active,
+  lavaHeight,
+  resetToken,
+  onDeath,
+  onEscape,
+}: {
+  active: boolean
+  lavaHeight: number
+  resetToken: number
+  onDeath: () => void
+  onEscape: () => void
+}) {
+  const body = useRef<RapierRigidBody>(null)
+  const grounded = useRef(false)
+  const deathCooldown = useRef(false)
+  const { keys, jumpQueued } = useRunnerControls()
+
+  useEffect(() => {
+    body.current?.setTranslation(SPAWN, true)
+    body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    deathCooldown.current = false
+  }, [resetToken])
+
+  useFrame(() => {
+    const runner = body.current
+    if (!runner) return
+    const position = runner.translation()
+
+    if (position.y < lavaHeight + 0.35 && !deathCooldown.current) {
+      deathCooldown.current = true
+      onDeath()
+      runner.setTranslation(SPAWN, true)
+      runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
+      window.setTimeout(() => { deathCooldown.current = false }, 700)
+      return
+    }
+
+    if (position.y > 8.65) onEscape()
+    if (!active) return
+
+    const velocity = movementVelocity(keys.current, PLAYER_SPEED)
+    const current = runner.linvel()
+    runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
+
+    if (jumpQueued.current) {
+      if (grounded.current) {
+        runner.setLinvel({ x: velocity.x, y: JUMP_SPEED, z: velocity.z }, true)
+        grounded.current = false
+      }
+      jumpQueued.current = false
+    }
+  })
+
+  return (
+    <>
+      <RigidBody
+        ref={body}
+        position={[SPAWN.x, SPAWN.y, SPAWN.z]}
+        colliders={false}
+        enabledRotations={[false, false, false]}
+        linearDamping={0.9}
+        canSleep={false}
+        onCollisionEnter={() => { grounded.current = true }}
+        onCollisionExit={() => { grounded.current = false }}
+      >
+        <CapsuleCollider args={[0.42, 0.3]} />
+        <mesh castShadow>
+          <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
+          <meshStandardMaterial color="#f8f3ff" emissive="#5527a8" emissiveIntensity={0.55} />
+        </mesh>
+        <pointLight color="#b87cff" intensity={4} distance={3} />
+      </RigidBody>
+      <ThirdPersonCamera target={body} />
+    </>
+  )
+}
+
+function Lava({ height }: { height: number }) {
   const lava = useRef<Mesh<PlaneGeometry, MeshStandardMaterial>>(null)
   useFrame(({ clock }) => {
     if (!lava.current) return
-    lava.current.position.y = -5 + ((clock.elapsedTime * 0.22) % 4)
     lava.current.material.emissiveIntensity = 1.8 + Math.sin(clock.elapsedTime * 3) * 0.35
   })
 
   return (
-    <mesh ref={lava} position={[0, -5, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <planeGeometry args={[28, 28, 32, 32]} />
+    <mesh ref={lava} position={[0, height, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[30, 30, 32, 32]} />
       <meshStandardMaterial color="#ff3b00" emissive="#ff2100" emissiveIntensity={2} />
     </mesh>
   )
 }
 
-function RunnerBot({ index }: { index: number }) {
+function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
   const bot = useRef<Mesh>(null)
-  useFrame(({ clock }) => {
+  const pose = botPoseAt(elapsed, index)
+
+  useFrame(() => {
     if (!bot.current) return
-    const t = clock.elapsedTime * (0.65 + index * 0.07) + index * 2
-    bot.current.position.x = Math.sin(t) * 2.4
-    bot.current.position.z = Math.cos(t * 0.8) * 1.8
-    bot.current.position.y = 1.2 + ((clock.elapsedTime * 0.35 + index * 1.5) % 9)
+    const next = botPoseAt(elapsed, index)
+    bot.current.position.set(next.x, next.y, next.z)
+    bot.current.rotation.y += 0.025 + index * 0.004
   })
 
   return (
-    <Float speed={3} rotationIntensity={0.2} floatIntensity={0.2}>
-      <mesh ref={bot}>
-        <capsuleGeometry args={[0.28, 0.65, 8, 16]} />
-        <meshStandardMaterial color={['#7cf7ff', '#b3ff6f', '#f6a6ff'][index]} emissive="#164d62" />
-      </mesh>
-    </Float>
+    <mesh ref={bot} position={[pose.x, pose.y, pose.z]} castShadow>
+      <capsuleGeometry args={[0.25, 0.6, 8, 16]} />
+      <meshStandardMaterial
+        color={['#7cf7ff', '#b3ff6f', '#f6a6ff'][index]}
+        emissive={pose.escaped ? '#ff9b36' : '#164d62'}
+        emissiveIntensity={pose.escaped ? 1.5 : 0.45}
+      />
+    </mesh>
   )
 }
 
-function Tower() {
+function Tower({ elapsed, lavaHeight, active, resetToken, onDeath, onEscape }: {
+  elapsed: number
+  lavaHeight: number
+  active: boolean
+  resetToken: number
+  onDeath: () => void
+  onEscape: () => void
+}) {
   const platforms = useMemo(
-    () => Array.from({ length: PLATFORM_COUNT }, (_, index) => ({
-      y: index * 0.72 - 3.2,
-      x: Math.sin(index * 1.9) * 2.2,
-      z: Math.cos(index * 1.4) * 1.5,
-      width: index % 4 === 0 ? 3.8 : 2.5,
-    })),
+    () => Array.from({ length: PLATFORM_COUNT }, (_, index) => {
+      if (index === 0) return { y: -3.2, x: 0, z: 0, width: 5.2 }
+      const angle = index * 0.72
+      return {
+        y: index * 0.68 - 3.2,
+        x: Math.sin(angle) * 2.25,
+        z: Math.cos(angle) * 1.75,
+        width: index % 4 === 0 ? 3.7 : 2.7,
+      }
+    }),
     [],
   )
 
   return (
     <>
       {platforms.map((platform, index) => (
-        <RigidBody type="fixed" key={index} colliders="cuboid">
-          <mesh position={[platform.x, platform.y, platform.z]}>
-            <boxGeometry args={[platform.width, 0.22, 1.45]} />
-            <meshStandardMaterial color={index > 11 ? '#745783' : '#3b303f'} roughness={0.72} />
+        <RigidBody type="fixed" key={index} colliders="cuboid" position={[platform.x, platform.y, platform.z]}>
+          <mesh receiveShadow>
+            <boxGeometry args={[platform.width, 0.24, 1.65]} />
+            <meshStandardMaterial color={index > 12 ? '#745783' : '#3b303f'} roughness={0.72} />
           </mesh>
         </RigidBody>
       ))}
-      <mesh position={[0, 8.5, 0]}>
+      <mesh position={[0, 8.8, 0]}>
         <torusGeometry args={[1.5, 0.28, 16, 48]} />
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
       </mesh>
-      <Text position={[0, 10.5, 0]} fontSize={0.7} color="#ffd7a0" anchorX="center">
+      <Text position={[0, 10.25, 0]} fontSize={0.7} color="#ffd7a0" anchorX="center">
         ESCAPE
       </Text>
-      {[0, 1, 2].map((index) => <RunnerBot key={index} index={index} />)}
-      <Lava />
+      {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
+      <PlayerRunner
+        active={active}
+        lavaHeight={lavaHeight}
+        resetToken={resetToken}
+        onDeath={onDeath}
+        onEscape={onEscape}
+      />
+      <Lava height={lavaHeight} />
     </>
   )
 }
 
-function GamePreview() {
+function GameScene(props: Parameters<typeof Tower>[0]) {
   return (
-    <Canvas camera={{ position: [9, 7, 13], fov: 48 }} shadows>
+    <Canvas camera={{ position: [7, 3, 8], fov: 48 }} shadows>
       <color attach="background" args={['#09060d']} />
       <fog attach="fog" args={['#160911', 12, 31]} />
       <ambientLight intensity={0.45} />
       <directionalLight position={[6, 12, 8]} intensity={2.2} color="#ffb56f" castShadow />
       <pointLight position={[0, -2, 2]} intensity={65} color="#ff2500" distance={18} />
       <Physics gravity={[0, -18, 0]}>
-        <Tower />
+        <Tower {...props} />
       </Physics>
       <Environment preset="night" />
     </Canvas>
   )
 }
 
-export default function App() {
+function formatTime(seconds: number) {
+  const remaining = Math.max(0, Math.ceil(180 - seconds))
+  const minutes = Math.floor(remaining / 60)
+  return `${String(minutes).padStart(2, '0')}:${String(remaining % 60).padStart(2, '0')}`
+}
+
+export default function HellbreakGame() {
+  const [started, setStarted] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const [deaths, setDeaths] = useState(0)
+  const [playerEscaped, setPlayerEscaped] = useState(false)
+  const [resetToken, setResetToken] = useState(0)
+
+  const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
+  const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
+  const match = stepMatch(rawMatch, elapsed)
+  const finished = started && match.phase === 'finished'
+
+  useEffect(() => {
+    if (!started || finished) return
+    const timer = window.setInterval(() => setElapsed((value) => Math.min(180, value + 0.1)), 100)
+    return () => window.clearInterval(timer)
+  }, [started, finished])
+
+  const startMatch = () => {
+    setElapsed(0)
+    setDeaths(0)
+    setPlayerEscaped(false)
+    setResetToken((value) => value + 1)
+    setStarted(true)
+  }
+
+  const status = !started
+    ? 'READY FOR BOT MATCH'
+    : finished
+      ? `${match.winner?.toUpperCase()} WIN · PRESS REMATCH`
+      : playerEscaped
+        ? 'YOU ESCAPED'
+        : 'CLIMB BEFORE THE LAVA'
+
   return (
     <main className="shell">
       <section className="hud" aria-label="Game prototype information">
-        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · MVP 0.1</div>
+        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · PLAYABLE MVP 0.2</div>
         <h1>HELL<span>BREAK</span></h1>
         <p className="tagline">RUN UP. FOOL THE WARDEN. ESCAPE HELL.</p>
         <div className="match-card">
-          <div><strong>3</strong><small>RUNNER BOTS</small></div>
-          <div><strong>01:48</strong><small>LAVA RISING</small></div>
-          <div><strong>1 / 3</strong><small>SEALS BROKEN</small></div>
+          <div><strong>{3 - escapedBots}</strong><small>BOTS CLIMBING</small></div>
+          <div><strong>{formatTime(elapsed)}</strong><small>LAVA RISING</small></div>
+          <div><strong>{deaths}</strong><small>LAVA FALLS</small></div>
         </div>
         <p className="brief">
-          A browser-first asymmetric vertical chase. Soul echoes deceive the Warden—and become
-          temporary platforms when sacrificed to the lava.
+          Race three autonomous runners to the exit. The lava rises continuously; falling resets
+          you to the lowest platform while the match clock keeps moving.
         </p>
-        <button type="button">BOT MATCH · COMING NEXT</button>
+        <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
+          {!started ? 'START BOT MATCH' : finished ? 'REMATCH' : 'RESTART MATCH'}
+        </button>
         <ul>
           <li><kbd>WASD</kbd> move</li>
           <li><kbd>SPACE</kbd> jump</li>
-          <li><kbd>Q</kbd> soul echo</li>
+          <li><kbd>Q</kbd> soul echo next</li>
         </ul>
       </section>
-      <section className="viewport" aria-label="Animated 3D vertical prison preview">
-        <GamePreview />
+      <section className="viewport" aria-label="Playable 3D vertical prison bot match">
+        <GameScene
+          elapsed={elapsed}
+          lavaHeight={match.lavaHeight}
+          active={started && !finished && !playerEscaped}
+          resetToken={resetToken}
+          onDeath={() => setDeaths((value) => value + 1)}
+          onEscape={() => setPlayerEscaped(true)}
+        />
         <div className="scanline" />
-        <div className="status"><i /> LOCAL PROTOTYPE ONLINE</div>
+        <div className="game-banner">{status}</div>
+        <div className="status"><i /> NEXT.JS LOCAL GAME ONLINE</div>
       </section>
     </main>
   )
