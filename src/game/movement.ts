@@ -1,3 +1,6 @@
+import { PLAYGROUND_ROUTE, playgroundPlatformPose } from './playground'
+import type { PlaygroundPlatform } from './playground'
+
 export interface MovementInput {
   forward?: boolean
   backward?: boolean
@@ -35,28 +38,14 @@ export function cycleSpectatorIndex(current: number, direction: -1 | 1, runnerCo
   return (current + direction + runnerCount) % runnerCount
 }
 
-export interface PlatformPose {
-  x: number
-  y: number
-  z: number
-  width: number
-}
+export type PlatformPose = PlaygroundPlatform
 
 const BOT_HOP_SECONDS = 2.3
 const BOT_WAIT_FRACTION = 0.28
-const LAST_PLATFORM_INDEX = 16
+const LAST_PLATFORM_INDEX = PLAYGROUND_ROUTE.length - 1
 
 export function platformPose(index: number): PlatformPose {
-  const safeIndex = Math.max(0, Math.min(LAST_PLATFORM_INDEX, Math.floor(index)))
-  if (safeIndex === 0) return { x: 0, y: -3.2, z: 0, width: 5.2 }
-
-  const angle = safeIndex * 0.72
-  return {
-    x: Math.sin(angle) * 2.25,
-    y: safeIndex * 0.68 - 3.2,
-    z: Math.cos(angle) * 1.75,
-    width: safeIndex % 4 === 0 ? 3.7 : 2.7,
-  }
+  return playgroundPlatformPose(index)
 }
 
 export function botPoseAt(elapsedSeconds: number, index: number): BotPose {

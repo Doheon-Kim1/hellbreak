@@ -7,24 +7,27 @@ import type { RapierRigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from '../game/movement'
+import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 import { playerPresentation } from '../game/player-lifecycle'
+import { GiantPlayground } from './GiantPlayground'
 
-const PLATFORM_COUNT = 17
 const PLAYER_SPEED = 5.8
+const SPRINT_SPEED = 8.2
 const JUMP_SPEED = 7.4
-const SPAWN = { x: 0, y: -2.2, z: 0 }
+const SPAWN = { x: -26, y: -2.2, z: 22 }
+const ESCAPE_HEIGHT = 7.75
 
 type KeyState = {
   forward: boolean
   backward: boolean
   left: boolean
   right: boolean
+  sprint: boolean
 }
 
 function useRunnerControls() {
-  const keys = useRef<KeyState>({ forward: false, backward: false, left: false, right: false })
+  const keys = useRef<KeyState>({ forward: false, backward: false, left: false, right: false, sprint: false })
   const jumpQueued = useRef(false)
 
   useEffect(() => {
@@ -33,6 +36,7 @@ function useRunnerControls() {
       if (code === 'KeyS' || code === 'ArrowDown') keys.current.backward = pressed
       if (code === 'KeyA' || code === 'ArrowLeft') keys.current.left = pressed
       if (code === 'KeyD' || code === 'ArrowRight') keys.current.right = pressed
+      if (code === 'ShiftLeft' || code === 'ShiftRight') keys.current.sprint = pressed
       if (code === 'Space' && pressed && !repeat) jumpQueued.current = true
     }
 
@@ -42,7 +46,7 @@ function useRunnerControls() {
     }
     const onKeyUp = (event: KeyboardEvent) => setKey(event.code, false)
     const clear = () => {
-      keys.current = { forward: false, backward: false, left: false, right: false }
+      keys.current = { forward: false, backward: false, left: false, right: false, sprint: false }
       jumpQueued.current = false
     }
 
@@ -133,9 +137,9 @@ function PlayerRunner({
       return
     }
 
-    if (position.y > 8.65) onEscape()
+    if (position.y > ESCAPE_HEIGHT) onEscape()
 
-    const velocity = movementVelocity(keys.current, PLAYER_SPEED)
+    const velocity = movementVelocity(keys.current, keys.current.sprint ? SPRINT_SPEED : PLAYER_SPEED)
     const current = runner.linvel()
     runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
 
@@ -180,7 +184,7 @@ function Lava({ height }: { height: number }) {
 
   return (
     <mesh ref={lava} position={[0, height, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <planeGeometry args={[30, 30, 32, 32]} />
+      <planeGeometry args={[140, 140, 32, 32]} />
       <meshStandardMaterial color="#ff3b00" emissive="#ff2100" emissiveIntensity={2} />
     </mesh>
   )
@@ -222,26 +226,14 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, spectat
 }) {
   const playerBody = useRef<RapierRigidBody>(null)
   const presentation = playerPresentation({ spectating, escaped: playerEscaped })
-  const platforms = useMemo(
-    () => Array.from({ length: PLATFORM_COUNT }, (_, index) => platformPose(index)),
-    [],
-  )
-
   return (
     <>
-      {platforms.map((platform, index) => (
-        <RigidBody type="fixed" key={index} colliders="cuboid" position={[platform.x, platform.y, platform.z]}>
-          <mesh receiveShadow>
-            <boxGeometry args={[platform.width, 0.24, 1.65]} />
-            <meshStandardMaterial color={index > 12 ? '#745783' : '#3b303f'} roughness={0.72} />
-          </mesh>
-        </RigidBody>
-      ))}
-      <mesh position={[0, 8.8, 0]}>
+      <GiantPlayground />
+      <mesh position={[-10, 8.7, 2]}>
         <torusGeometry args={[1.5, 0.28, 16, 48]} />
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
       </mesh>
-      <Text position={[0, 10.25, 0]} fontSize={0.7} color="#ffd7a0" anchorX="center">
+      <Text position={[-10, 10.15, 2]} fontSize={0.7} color="#ffd7a0" anchorX="center">
         탈출구
       </Text>
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
@@ -269,10 +261,10 @@ function GameScene(props: Parameters<typeof Tower>[0]) {
   return (
     <Canvas camera={{ position: [7, 3, 8], fov: 48 }} shadows>
       <color attach="background" args={['#09060d']} />
-      <fog attach="fog" args={['#160911', 12, 31]} />
+      <fog attach="fog" args={['#160911', 35, 105]} />
       <ambientLight intensity={0.45} />
-      <directionalLight position={[6, 12, 8]} intensity={2.2} color="#ffb56f" castShadow />
-      <pointLight position={[0, -2, 2]} intensity={65} color="#ff2500" distance={18} />
+      <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" castShadow />
+      <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
       <Physics gravity={[0, -18, 0]}>
         <Tower {...props} />
       </Physics>
@@ -341,7 +333,7 @@ export default function HellbreakGame() {
         ? `도망자 ${spectatorIndex + 1} 관전 중 · Q/E로 변경`
         : playerEscaped
         ? '지옥 탈출 성공'
-        : '용암을 피해 위로 올라가세요'
+        : '거대한 놀이터를 건너 탈출대로 올라가세요'
 
   return (
     <main className="shell">
@@ -355,8 +347,8 @@ export default function HellbreakGame() {
           <div><strong>{deaths}</strong><small>용암 사망</small></div>
         </div>
         <p className="brief">
-          상승하는 용암을 피해 발판을 올라 탈출구에 도착하세요. 용암에 빠져 죽으면 경기는
-          관전 모드로 계속되며, Q와 E로 살아 있는 도망자를 바꿔 볼 수 있습니다.
+          거대한 미끄럼틀, 정글짐, 그네와 구름다리를 건너 최상단 탈출구에 도착하세요.
+          용암에 빠져 죽으면 Q와 E로 살아 있는 도망자를 관전할 수 있습니다.
         </p>
         <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
           {!started ? '봇 경기 시작' : finished ? '다시 경기' : '경기 재시작'}
@@ -364,10 +356,11 @@ export default function HellbreakGame() {
         <ul>
           <li><kbd>WASD</kbd> 이동</li>
           <li><kbd>SPACE</kbd> 점프</li>
+          <li><kbd>SHIFT</kbd> 달리기</li>
           <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>
         </ul>
       </section>
-      <section className="viewport" aria-label="플레이 가능한 3D 수직 감옥 봇 경기">
+      <section className="viewport" aria-label="플레이 가능한 거대 놀이터 3D 봇 경기">
         <GameScene
           elapsed={elapsed}
           lavaHeight={match.lavaHeight}

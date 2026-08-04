@@ -31,8 +31,11 @@ npm start
 
 - WASD 및 방향키 이동과 정규화된 대각선 속도
 - Space 점프와 Rapier 충돌
+- Shift 달리기
 - 부드러운 3인칭 추적 카메라
-- 물리 충돌이 적용된 17단 수직 탑
+- 실제 놀이터 사진을 참고한 90 × 90 거대 놀이터 임시 맵
+- 미끄럼틀 탑, 그네, 정글짐, 시소, 모래 구역, 탈출 전망대
+- 넓은 맵을 횡단하는 물리 충돌 기반 17단 상승 경로
 - 상승하는 용암, 플레이어 사망 및 관전 전환
 - 발판 대기와 포물선 점프를 사용하는 도망자 봇 3명
 - Q/E 관전 대상 전환과 봇 추적 카메라
@@ -61,4 +64,4 @@ HIVE 매치메이킹은 입장할 룸을 선택하거나 할당합니다. 프레
 - GitHub Pages 수동 배포: `npm run deploy:pages`
 - Vercel: 추후 연결 예정
 
-아키텍처는 [`docs/architecture.md`](docs/architecture.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.
+아키텍처는 [`docs/architecture.md`](docs/architecture.md), 놀이터 참고 자료는 [`docs/playground-reference.md`](docs/playground-reference.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.
