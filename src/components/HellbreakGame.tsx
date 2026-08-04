@@ -1,7 +1,6 @@
 'use client'
 
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import type { RootState } from '@react-three/fiber'
 import { Environment, Text } from '@react-three/drei'
 import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
 import type { RapierRigidBody } from '@react-three/rapier'
@@ -10,6 +9,7 @@ import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
+import { playerPresentation } from '../game/player-lifecycle'
 
 const PLATFORM_COUNT = 17
 const PLAYER_SPEED = 5.8
@@ -59,34 +59,35 @@ function useRunnerControls() {
   return { keys, jumpQueued }
 }
 
-function ThirdPersonCamera({ target }: { target: React.RefObject<RapierRigidBody | null> }) {
+function GameCamera({
+  player,
+  mode,
+  elapsed,
+  spectatorIndex,
+}: {
+  player: React.RefObject<RapierRigidBody | null>
+  mode: 'player' | 'spectator'
+  elapsed: number
+  spectatorIndex: number
+}) {
   const { camera } = useThree()
   const desired = useMemo(() => new Vector3(), [])
   const lookAt = useMemo(() => new Vector3(), [])
 
   useFrame((_, delta) => {
-    const body = target.current
-    if (!body) return
-    const position = body.translation()
-    desired.set(position.x + 6.8, position.y + 4.2, position.z + 7.6)
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 5.5))
-    lookAt.set(position.x, position.y + 0.75, position.z)
-    camera.lookAt(lookAt)
-  })
+    if (mode === 'spectator') {
+      const pose = botPoseAt(elapsed, spectatorIndex)
+      desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
+      lookAt.set(pose.x, pose.y + 0.55, pose.z)
+    } else {
+      const body = player.current
+      if (!body) return
+      const position = body.translation()
+      desired.set(position.x + 6.8, position.y + 4.2, position.z + 7.6)
+      lookAt.set(position.x, position.y + 0.75, position.z)
+    }
 
-  return null
-}
-
-function SpectatorCamera({ elapsed, targetIndex }: { elapsed: number; targetIndex: number }) {
-  const { camera } = useThree()
-  const desired = useMemo(() => new Vector3(), [])
-  const lookAt = useMemo(() => new Vector3(), [])
-
-  useFrame((_state: RootState, delta: number) => {
-    const pose = botPoseAt(elapsed, targetIndex)
-    desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
     camera.position.lerp(desired, 1 - Math.exp(-delta * 4.8))
-    lookAt.set(pose.x, pose.y + 0.55, pose.z)
     camera.lookAt(lookAt)
   })
 
@@ -94,21 +95,22 @@ function SpectatorCamera({ elapsed, targetIndex }: { elapsed: number; targetInde
 }
 
 function PlayerRunner({
+  body,
   active,
-  cameraActive,
+  renderBody,
   lavaHeight,
   resetToken,
   onDeath,
   onEscape,
 }: {
+  body: React.RefObject<RapierRigidBody | null>
   active: boolean
-  cameraActive: boolean
+  renderBody: boolean
   lavaHeight: number
   resetToken: number
   onDeath: () => void
   onEscape: () => void
 }) {
-  const body = useRef<RapierRigidBody>(null)
   const grounded = useRef(false)
   const deathCooldown = useRef(false)
   const { keys, jumpQueued } = useRunnerControls()
@@ -117,7 +119,7 @@ function PlayerRunner({
     body.current?.setTranslation(SPAWN, true)
     body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
     deathCooldown.current = false
-  }, [resetToken])
+  }, [body, resetToken])
 
   useFrame(() => {
     const runner = body.current
@@ -126,9 +128,8 @@ function PlayerRunner({
 
     if (position.y < lavaHeight + 0.35 && !deathCooldown.current) {
       deathCooldown.current = true
-      onDeath()
-      runner.setTranslation({ x: 0, y: -50, z: 0 }, true)
       runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
+      onDeath()
       return
     }
 
@@ -147,27 +148,26 @@ function PlayerRunner({
     }
   })
 
+  if (!renderBody) return null
+
   return (
-    <>
-      <RigidBody
-        ref={body}
-        position={[SPAWN.x, SPAWN.y, SPAWN.z]}
-        colliders={false}
-        enabledRotations={[false, false, false]}
-        linearDamping={0.9}
-        canSleep={false}
-        onCollisionEnter={() => { grounded.current = true }}
-        onCollisionExit={() => { grounded.current = false }}
-      >
-        <CapsuleCollider args={[0.42, 0.3]} />
-        <mesh castShadow>
-          <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
-          <meshStandardMaterial color="#f8f3ff" emissive="#5527a8" emissiveIntensity={0.55} />
-        </mesh>
-        <pointLight color="#b87cff" intensity={4} distance={3} />
-      </RigidBody>
-      {cameraActive && <ThirdPersonCamera target={body} />}
-    </>
+    <RigidBody
+      ref={body}
+      position={[SPAWN.x, SPAWN.y, SPAWN.z]}
+      colliders={false}
+      enabledRotations={[false, false, false]}
+      linearDamping={0.9}
+      canSleep={false}
+      onCollisionEnter={() => { grounded.current = true }}
+      onCollisionExit={() => { grounded.current = false }}
+    >
+      <CapsuleCollider args={[0.42, 0.3]} />
+      <mesh castShadow>
+        <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
+        <meshStandardMaterial color="#f8f3ff" emissive="#5527a8" emissiveIntensity={0.55} />
+      </mesh>
+      <pointLight color="#b87cff" intensity={4} distance={3} />
+    </RigidBody>
   )
 }
 
@@ -209,16 +209,19 @@ function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
   )
 }
 
-function Tower({ elapsed, lavaHeight, active, resetToken, spectating, spectatorIndex, onDeath, onEscape }: {
+function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, spectating, spectatorIndex, onDeath, onEscape }: {
   elapsed: number
   lavaHeight: number
   active: boolean
+  playerEscaped: boolean
   resetToken: number
   spectating: boolean
   spectatorIndex: number
   onDeath: () => void
   onEscape: () => void
 }) {
+  const playerBody = useRef<RapierRigidBody>(null)
+  const presentation = playerPresentation({ spectating, escaped: playerEscaped })
   const platforms = useMemo(
     () => Array.from({ length: PLATFORM_COUNT }, (_, index) => platformPose(index)),
     [],
@@ -242,10 +245,16 @@ function Tower({ elapsed, lavaHeight, active, resetToken, spectating, spectatorI
         탈출구
       </Text>
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
-      {spectating && <SpectatorCamera elapsed={elapsed} targetIndex={spectatorIndex} />}
+      <GameCamera
+        player={playerBody}
+        mode={presentation.cameraMode}
+        elapsed={elapsed}
+        spectatorIndex={spectatorIndex}
+      />
       <PlayerRunner
+        body={playerBody}
         active={active}
-        cameraActive={!spectating}
+        renderBody={presentation.renderBody}
         lavaHeight={lavaHeight}
         resetToken={resetToken}
         onDeath={onDeath}
@@ -363,6 +372,7 @@ export default function HellbreakGame() {
           elapsed={elapsed}
           lavaHeight={match.lavaHeight}
           active={started && !finished && !playerEscaped && !spectating}
+          playerEscaped={playerEscaped}
           resetToken={resetToken}
           spectating={spectating}
           spectatorIndex={spectatorIndex}

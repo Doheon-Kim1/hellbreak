@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { playerPresentation } from './player-lifecycle'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
 
 describe('runner movement rules', () => {
@@ -29,6 +30,15 @@ describe('spectator target selection', () => {
   it('moves backward and wraps before the first runner', () => {
     expect(cycleSpectatorIndex(1, -1, 3)).toBe(0)
     expect(cycleSpectatorIndex(0, -1, 3)).toBe(2)
+  })
+})
+
+describe('player death presentation', () => {
+  it('removes the physical player and transfers camera ownership while spectating', () => {
+    expect(playerPresentation({ spectating: true, escaped: false })).toEqual({
+      renderBody: false,
+      cameraMode: 'spectator',
+    })
   })
 })
 
