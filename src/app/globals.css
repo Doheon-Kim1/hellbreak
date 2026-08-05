@@ -38,7 +38,9 @@ button.active-match { border-color: #9d6555; color: #a98579; }
 ul { display: flex; gap: 1.1rem; padding: 0; margin: 1.5rem 0 0; list-style: none; color: #716773; font-size: .67rem; }
 kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
 .viewport { position: relative; min-height: 100vh; }
-.viewport canvas { position: absolute !important; inset: 0; }
+.viewport canvas { position: absolute !important; inset: 0; touch-action: none; cursor: grab; }
+.viewport canvas:active { cursor: grabbing; }
+.camera-hint { pointer-events: none; z-index: 4; position: absolute; top: 4.7rem; right: 1rem; padding: .4rem .6rem; border: 1px solid rgba(124, 247, 255, .28); background: rgba(7, 12, 18, .68); color: #9befff; font: 700 .58rem ui-monospace, monospace; letter-spacing: .08em; }
 .scene-error { position: absolute; z-index: 7; top: 50%; left: 50%; width: min(28rem, calc(100% - 2rem)); transform: translate(-50%, -50%); padding: 1.25rem; border: 1px solid rgba(255, 116, 72, .7); background: rgba(18, 7, 10, .96); color: #ffd2c5; text-align: center; }
 .scene-error strong { display: block; margin-bottom: .55rem; color: #ff7554; }
 .scene-error p { margin: 0 0 1rem; color: #c7a39c; font-size: .8rem; line-height: 1.5; }
@@ -83,6 +85,7 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
   .shell.playing .match-card div { padding: .45rem; }
   .shell.playing .hud > button { margin: 0; padding: .5rem .65rem; }
   .shell.playing .game-banner { top: 6.2rem; max-width: calc(100vw - 1.2rem); overflow: hidden; text-overflow: ellipsis; }
+  .shell.playing .camera-hint { top: 9rem; right: .8rem; }
   .shell.playing .status { display: none; }
 
   .mobile-controls {

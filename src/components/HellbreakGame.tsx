@@ -7,6 +7,8 @@ import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
+import { DEFAULT_CAMERA_ORBIT, cameraOrbitOffset, rotateMovementByCamera, updateCameraOrbit } from '../game/camera'
+import type { CameraOrbit } from '../game/camera'
 import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
@@ -70,18 +72,73 @@ function useRunnerControls(controls: RunnerControls) {
 
 function GameCamera({
   player,
+  orbit,
   mode,
   elapsed,
   spectatorIndex,
+  resetToken,
 }: {
   player: RefObject<RapierRigidBody | null>
+  orbit: RefObject<CameraOrbit>
   mode: 'player' | 'spectator'
   elapsed: number
   spectatorIndex: number
+  resetToken: number
 }) {
-  const { camera } = useThree()
+  const { camera, gl } = useThree()
   const desired = useMemo(() => new Vector3(), [])
   const lookAt = useMemo(() => new Vector3(), [])
+
+  useEffect(() => {
+    orbit.current = { ...DEFAULT_CAMERA_ORBIT }
+  }, [orbit, resetToken])
+
+  useEffect(() => {
+    if (mode !== 'player') return
+    const canvas = gl.domElement
+    let drag: { pointerId: number; x: number; y: number } | null = null
+
+    const endDrag = (event: PointerEvent) => {
+      if (drag?.pointerId !== event.pointerId) return
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+      drag = null
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || !event.isPrimary) return
+      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+      canvas.setPointerCapture(event.pointerId)
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      if (drag?.pointerId !== event.pointerId) return
+      event.preventDefault()
+      orbit.current = updateCameraOrbit(orbit.current, {
+        deltaX: event.clientX - drag.x,
+        deltaY: event.clientY - drag.y,
+        zoomDelta: 0,
+      })
+      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+    }
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      orbit.current = updateCameraOrbit(orbit.current, { deltaX: 0, deltaY: 0, zoomDelta: event.deltaY })
+    }
+    const resetOrbit = () => { orbit.current = { ...DEFAULT_CAMERA_ORBIT } }
+
+    canvas.addEventListener('pointerdown', onPointerDown)
+    canvas.addEventListener('pointermove', onPointerMove)
+    canvas.addEventListener('pointerup', endDrag)
+    canvas.addEventListener('pointercancel', endDrag)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('dblclick', resetOrbit)
+    return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', endDrag)
+      canvas.removeEventListener('pointercancel', endDrag)
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('dblclick', resetOrbit)
+    }
+  }, [gl, mode, orbit])
 
   useFrame((_, delta) => {
     if (mode === 'spectator') {
@@ -92,11 +149,12 @@ function GameCamera({
       const body = player.current
       if (!body) return
       const position = body.translation()
-      desired.set(position.x + 6.8, position.y + 4.2, position.z + 7.6)
+      const offset = cameraOrbitOffset(orbit.current)
       lookAt.set(position.x, position.y + 0.75, position.z)
+      desired.set(lookAt.x + offset.x, lookAt.y + offset.y, lookAt.z + offset.z)
     }
 
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 4.8))
+    camera.position.lerp(desired, 1 - Math.exp(-delta * 7.2))
     camera.lookAt(lookAt)
   })
 
@@ -110,6 +168,7 @@ function PlayerRunner({
   lavaHeight,
   resetToken,
   controls,
+  cameraOrbit,
   onDeath,
   onEscape,
 }: {
@@ -119,6 +178,7 @@ function PlayerRunner({
   lavaHeight: number
   resetToken: number
   controls: RunnerControls
+  cameraOrbit: RefObject<CameraOrbit>
   onDeath: () => void
   onEscape: () => void
 }) {
@@ -147,7 +207,8 @@ function PlayerRunner({
     if (position.y > ESCAPE_HEIGHT) onEscape()
 
     const input = readRunnerInput(controls.input.current)
-    const velocity = movementVelocity(input, input.sprint ? SPRINT_SPEED : PLAYER_SPEED)
+    const localVelocity = movementVelocity(input, input.sprint ? SPRINT_SPEED : PLAYER_SPEED)
+    const velocity = rotateMovementByCamera(localVelocity, cameraOrbit.current.yaw)
     const current = runner.linvel()
     runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
 
@@ -234,6 +295,7 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
   onEscape: () => void
 }) {
   const playerBody = useRef<RapierRigidBody>(null)
+  const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const presentation = playerPresentation({ spectating, escaped: playerEscaped })
   return (
     <>
@@ -245,9 +307,11 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
       {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
       <GameCamera
         player={playerBody}
+        orbit={cameraOrbit}
         mode={presentation.cameraMode}
         elapsed={elapsed}
         spectatorIndex={spectatorIndex}
+        resetToken={resetToken}
       />
       <PlayerRunner
         body={playerBody}
@@ -256,6 +320,7 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
         lavaHeight={lavaHeight}
         resetToken={resetToken}
         controls={controls}
+        cameraOrbit={cameraOrbit}
         onDeath={onDeath}
         onEscape={onEscape}
       />
@@ -548,6 +613,7 @@ export default function HellbreakGame() {
           <li><kbd>WASD</kbd> 이동</li>
           <li><kbd>SPACE</kbd> 점프</li>
           <li><kbd>SHIFT</kbd> 달리기</li>
+          <li><kbd>DRAG</kbd> 시점 회전 · 휠 거리 조절</li>
           <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>
         </ul>
       </section>
@@ -593,6 +659,9 @@ export default function HellbreakGame() {
         )}
         <div className="scanline" />
         <div className="game-banner">{status}</div>
+        {started && sceneReady && !finished && !playerEscaped && !spectating && (
+          <div className="camera-hint">화면 드래그 · 시점 회전</div>
+        )}
         {spectating && !finished && (
           <div className="spectator-controls" aria-label="관전 대상 변경">
             <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, -1, 3))}>

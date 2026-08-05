@@ -53,6 +53,31 @@ test('mobile compositor presents colorful WebGL gameplay pixels', async () => {
   }
 
   expect(colorfulPixels / (sample.length / 3)).toBeGreaterThan(0.08)
+
+  const beforeDrag = await sharp(screenshot).removeAlpha().raw().toBuffer()
+  const cdp = await context.newCDPSession(page)
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: 305, y: 410, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
+  })
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [{ x: 95, y: 330, id: 1, radiusX: 4, radiusY: 4, force: 1 }],
+  })
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await page.waitForTimeout(1_000)
+
+  const afterDrag = await sharp(await page.screenshot()).removeAlpha().raw().toBuffer()
+  let changedPixels = 0
+  for (let index = 0; index < beforeDrag.length; index += 3) {
+    const difference = Math.abs(beforeDrag[index] - afterDrag[index])
+      + Math.abs(beforeDrag[index + 1] - afterDrag[index + 1])
+      + Math.abs(beforeDrag[index + 2] - afterDrag[index + 2])
+    if (difference > 60) changedPixels += 1
+  }
+
+  expect(changedPixels / (beforeDrag.length / 3)).toBeGreaterThan(0.2)
+  await expect(page.getByText('화면 드래그 · 시점 회전')).toBeVisible()
   expect(pageErrors).toEqual([])
   await browser.close()
 })
