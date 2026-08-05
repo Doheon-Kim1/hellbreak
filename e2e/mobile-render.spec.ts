@@ -15,7 +15,7 @@ test('mobile compositor presents colorful WebGL gameplay pixels', async () => {
 
   await page.goto('/', { waitUntil: 'networkidle' })
   await page.getByRole('button', { name: '봇 경기 시작' }).click()
-  await expect(page.getByText('거대한 놀이터를 건너 탈출대로 올라가세요')).toBeVisible()
+  await expect(page.locator('.danger-chip')).toContainText('그네 폭주', { timeout: 15_000 })
 
   const canvasWrapperHeight = await page.locator('canvas').evaluate((canvas) => (
     canvas.parentElement?.getBoundingClientRect().height ?? 0
@@ -77,7 +77,7 @@ test('mobile compositor presents colorful WebGL gameplay pixels', async () => {
   }
 
   expect(changedPixels / (beforeDrag.length / 3)).toBeGreaterThan(0.2)
-  await expect(page.getByText('화면 드래그 · 시점 회전')).toBeVisible()
+  await expect(page.getByRole('button', { name: '능력 사용' })).toBeVisible()
   expect(pageErrors).toEqual([])
   await browser.close()
 })

@@ -1,8 +1,8 @@
 'use client'
 
 import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber'
-import { CapsuleCollider, Physics, RigidBody } from '@react-three/rapier'
-import type { RapierRigidBody } from '@react-three/rapier'
+import { CapsuleCollider, CuboidCollider, Physics, RigidBody, useRapier } from '@react-three/rapier'
+import type { IntersectionEnterPayload, IntersectionExitPayload, RapierCollider, RapierRigidBody } from '@react-three/rapier'
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Vector3 } from 'three'
@@ -11,6 +11,8 @@ import { DEFAULT_CAMERA_ORBIT, cameraOrbitOffset, rotateMovementByCamera, update
 import type { CameraOrbit } from '../game/camera'
 import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
+import { abilitySpec, hellEventAt, pickupAbility } from '../game/hell-events'
+import type { HellEventState, RunnerAbility } from '../game/hell-events'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
@@ -22,11 +24,17 @@ const SPRINT_SPEED = 8.2
 const JUMP_SPEED = 7.4
 const SPAWN = { x: -26, y: -2.2, z: 22 }
 const ESCAPE_HEIGHT = 7.75
+const ABILITY_PICKUPS: readonly { ability: RunnerAbility; position: readonly [number, number, number] }[] = [
+  { ability: 'rocket-boots', position: [-18, -0.95, 14] },
+  { ability: 'spring-shoes', position: [2, 1.55, 4] },
+  { ability: 'extinguisher', position: [-5, 6.05, -12] },
+]
 const KEY_ART_URL = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/assets/hellbreak-key-art.webp`
 
 type RunnerControls = {
   input: RefObject<RunnerControlSources>
   jumpQueued: RefObject<boolean>
+  abilityQueued: RefObject<boolean>
 }
 
 function useRunnerControls(controls: RunnerControls) {
@@ -47,6 +55,7 @@ function useRunnerControls(controls: RunnerControls) {
         )
       }
       if (code === 'Space' && pressed && !repeat) controls.jumpQueued.current = true
+      if (code === 'KeyF' && pressed && !repeat) controls.abilityQueued.current = true
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -57,6 +66,7 @@ function useRunnerControls(controls: RunnerControls) {
     const clear = () => {
       controls.input.current = createRunnerControlSources()
       controls.jumpQueued.current = false
+      controls.abilityQueued.current = false
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -166,9 +176,13 @@ function PlayerRunner({
   active,
   renderBody,
   lavaHeight,
+  elapsed,
+  heldAbility,
   resetToken,
   controls,
   cameraOrbit,
+  onConsumeAbility,
+  onFeedback,
   onDeath,
   onEscape,
 }: {
@@ -176,46 +190,99 @@ function PlayerRunner({
   active: boolean
   renderBody: boolean
   lavaHeight: number
+  elapsed: number
+  heldAbility: RunnerAbility | null
   resetToken: number
   controls: RunnerControls
   cameraOrbit: RefObject<CameraOrbit>
+  onConsumeAbility: () => void
+  onFeedback: (message: string) => void
   onDeath: () => void
   onEscape: () => void
 }) {
-  const grounded = useRef(false)
+  const groundContacts = useRef<Set<number>>(new Set())
+  const footSensor = useRef<RapierCollider>(null)
+  const { world } = useRapier()
   const deathCooldown = useRef(false)
+  const rocketUntil = useRef(0)
+  const springArmed = useRef(false)
+  const lavaGraceUntil = useRef(0)
   useRunnerControls(controls)
 
   useEffect(() => {
     body.current?.setTranslation(SPAWN, true)
     body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
     deathCooldown.current = false
+    groundContacts.current.clear()
+    rocketUntil.current = 0
+    springArmed.current = false
+    lavaGraceUntil.current = 0
   }, [body, resetToken])
 
   useFrame(() => {
     const runner = body.current
     if (!runner || !active) return
+
+    const sensor = footSensor.current
+    if (sensor) {
+      for (const handle of groundContacts.current) {
+        const collider = world.getCollider(handle)
+        if (!collider || !world.intersectionPair(sensor, collider)) groundContacts.current.delete(handle)
+      }
+    }
+
     const position = runner.translation()
 
-    if (position.y < lavaHeight + 0.35 && !deathCooldown.current) {
-      deathCooldown.current = true
-      runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
-      onDeath()
+    if (position.y < lavaHeight + 0.35 && elapsed >= lavaGraceUntil.current && !deathCooldown.current) {
+      if (heldAbility === 'extinguisher') {
+        lavaGraceUntil.current = elapsed + 1.5
+        runner.setLinvel({ x: 0, y: JUMP_SPEED * 1.45, z: 0 }, true)
+        onConsumeAbility()
+        onFeedback('소화기 방어 · 용암에서 튕겨 올랐습니다')
+      } else {
+        deathCooldown.current = true
+        runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
+        onDeath()
+      }
       return
     }
 
     if (position.y > ESCAPE_HEIGHT) onEscape()
 
+    if (controls.abilityQueued.current) {
+      if (heldAbility === 'rocket-boots') {
+        rocketUntil.current = elapsed + abilitySpec(heldAbility).durationSeconds
+        onConsumeAbility()
+        onFeedback('로켓 운동화 발동 · 5초 가속')
+      } else if (heldAbility === 'spring-shoes') {
+        springArmed.current = true
+        onConsumeAbility()
+        onFeedback('스프링 장전 · 다음 점프 강화')
+      } else if (heldAbility === 'extinguisher') {
+        onFeedback('소화기는 용암 접촉 시 자동으로 작동합니다')
+      } else {
+        onFeedback('능력 아이템을 먼저 획득하세요')
+      }
+      controls.abilityQueued.current = false
+    }
+
     const input = readRunnerInput(controls.input.current)
-    const localVelocity = movementVelocity(input, input.sprint ? SPRINT_SPEED : PLAYER_SPEED)
+    const baseSpeed = input.sprint ? SPRINT_SPEED : PLAYER_SPEED
+    const speedMultiplier = elapsed < rocketUntil.current ? abilitySpec('rocket-boots').speedMultiplier : 1
+    const localVelocity = movementVelocity(input, baseSpeed * speedMultiplier)
     const velocity = rotateMovementByCamera(localVelocity, cameraOrbit.current.yaw)
     const current = runner.linvel()
     runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
 
     if (controls.jumpQueued.current) {
-      if (grounded.current) {
-        runner.setLinvel({ x: velocity.x, y: JUMP_SPEED, z: velocity.z }, true)
-        grounded.current = false
+      if (groundContacts.current.size > 0) {
+        const jumpMultiplier = springArmed.current ? abilitySpec('spring-shoes').jumpMultiplier : 1
+        runner.setLinvel({ x: velocity.x, y: JUMP_SPEED * jumpMultiplier, z: velocity.z }, true)
+        if (springArmed.current) {
+          springArmed.current = false
+          onFeedback('스프링 점프!')
+        }
+        groundContacts.current.clear()
       }
       controls.jumpQueued.current = false
     }
@@ -231,10 +298,16 @@ function PlayerRunner({
       enabledRotations={[false, false, false]}
       linearDamping={0.9}
       canSleep={false}
-      onCollisionEnter={() => { grounded.current = true }}
-      onCollisionExit={() => { grounded.current = false }}
     >
       <CapsuleCollider args={[0.42, 0.3]} />
+      <CuboidCollider
+        ref={footSensor}
+        args={[0.2, 0.08, 0.2]}
+        position={[0, -0.74, 0]}
+        sensor
+        onIntersectionEnter={({ other }: IntersectionEnterPayload) => { groundContacts.current.add(other.collider.handle) }}
+        onIntersectionExit={({ other }: IntersectionExitPayload) => { groundContacts.current.delete(other.collider.handle) }}
+      />
       <mesh castShadow>
         <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
         <meshStandardMaterial color="#f8f3ff" emissive="#5527a8" emissiveIntensity={0.55} />
@@ -282,15 +355,95 @@ function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
   )
 }
 
-function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, controls, spectating, spectatorIndex, onDeath, onEscape }: {
+function AbilityPickup({ ability, position }: { ability: RunnerAbility; position: readonly [number, number, number] }) {
+  const mesh = useRef<Mesh>(null)
+  const spec = abilitySpec(ability)
+  useFrame(({ clock }) => {
+    if (!mesh.current) return
+    mesh.current.rotation.y = clock.elapsedTime * 1.8
+    mesh.current.position.y = position[1] + Math.sin(clock.elapsedTime * 3 + position[0]) * 0.18
+  })
+  return (
+    <mesh ref={mesh} position={[position[0], position[1], position[2]]}>
+      <octahedronGeometry args={[0.55, 0]} />
+      <meshStandardMaterial color={spec.color} emissive={spec.color} emissiveIntensity={2.2} />
+      <pointLight color={spec.color} intensity={5} distance={3.5} />
+    </mesh>
+  )
+}
+
+function AbilityPickups({
+  player,
+  active,
+  resetToken,
+  onPickup,
+}: {
+  player: RefObject<RapierRigidBody | null>
+  active: boolean
+  resetToken: number
+  onPickup: (ability: RunnerAbility) => void
+}) {
+  const [collected, setCollected] = useState<ReadonlySet<RunnerAbility>>(() => new Set())
+  const collectedRef = useRef<ReadonlySet<RunnerAbility>>(collected)
+  collectedRef.current = collected
+
+  useEffect(() => {
+    const empty = new Set<RunnerAbility>()
+    collectedRef.current = empty
+    setCollected(empty)
+  }, [resetToken])
+
+  useFrame(() => {
+    const position = player.current?.translation()
+    if (!active || !position) return
+    for (const pickup of ABILITY_PICKUPS) {
+      if (collectedRef.current.has(pickup.ability)) continue
+      const [x, y, z] = pickup.position
+      if ((position.x - x) ** 2 + (position.y - y) ** 2 + (position.z - z) ** 2 > 2.25) continue
+      const next = new Set(collectedRef.current)
+      next.add(pickup.ability)
+      collectedRef.current = next
+      setCollected(next)
+      onPickup(pickup.ability)
+      break
+    }
+  })
+
+  return ABILITY_PICKUPS.map((pickup) => collected.has(pickup.ability)
+    ? null
+    : <AbilityPickup key={pickup.ability} ability={pickup.ability} position={pickup.position} />)
+}
+
+function Tower({
+  elapsed,
+  lavaHeight,
+  event,
+  active,
+  playerEscaped,
+  heldAbility,
+  resetToken,
+  controls,
+  spectating,
+  spectatorIndex,
+  onPickupAbility,
+  onConsumeAbility,
+  onFeedback,
+  onDeath,
+  onEscape,
+}: {
   elapsed: number
   lavaHeight: number
+  event: HellEventState
   active: boolean
   playerEscaped: boolean
+  heldAbility: RunnerAbility | null
   resetToken: number
   controls: RunnerControls
   spectating: boolean
   spectatorIndex: number
+  onPickupAbility: (ability: RunnerAbility) => void
+  onConsumeAbility: () => void
+  onFeedback: (message: string) => void
   onDeath: () => void
   onEscape: () => void
 }) {
@@ -299,7 +452,7 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
   const presentation = playerPresentation({ spectating, escaped: playerEscaped })
   return (
     <>
-      <GiantPlayground />
+      <GiantPlayground elapsed={elapsed} event={event} />
       <mesh position={[-10, 8.7, 2]}>
         <torusGeometry args={[1.5, 0.28, 16, 48]} />
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
@@ -313,14 +466,24 @@ function Tower({ elapsed, lavaHeight, active, playerEscaped, resetToken, control
         spectatorIndex={spectatorIndex}
         resetToken={resetToken}
       />
+      <AbilityPickups
+        player={playerBody}
+        active={active}
+        resetToken={resetToken}
+        onPickup={onPickupAbility}
+      />
       <PlayerRunner
         body={playerBody}
         active={active}
         renderBody={presentation.renderBody}
         lavaHeight={lavaHeight}
+        elapsed={elapsed}
+        heldAbility={heldAbility}
         resetToken={resetToken}
         controls={controls}
         cameraOrbit={cameraOrbit}
+        onConsumeAbility={onConsumeAbility}
+        onFeedback={onFeedback}
         onDeath={onDeath}
         onEscape={onEscape}
       />
@@ -456,7 +619,7 @@ function GameScene({
   )
 }
 
-function MobileControls({ controls }: { controls: RunnerControls }) {
+function MobileControls({ controls, heldAbility }: { controls: RunnerControls; heldAbility: RunnerAbility | null }) {
   const holdProps = (control: RunnerControl) => {
     const setPointer = (event: ReactPointerEvent<HTMLButtonElement>, pressed: boolean) => {
       controls.input.current = setRunnerControlSource(
@@ -487,6 +650,17 @@ function MobileControls({ controls }: { controls: RunnerControls }) {
         <button type="button" aria-label="오른쪽 이동" className="right" {...holdProps('right')}>▶</button>
       </div>
       <div className="mobile-actions">
+        <button
+          type="button"
+          aria-label="능력 사용"
+          className="ability"
+          onPointerDown={(event) => {
+            event.preventDefault()
+            controls.abilityQueued.current = true
+          }}
+        >
+          {heldAbility ? abilitySpec(heldAbility).label : '능력'}
+        </button>
         <button type="button" aria-label="달리기" {...holdProps('sprint')}>달리기</button>
         <button
           type="button"
@@ -520,13 +694,17 @@ export default function HellbreakGame() {
   const [resetToken, setResetToken] = useState(0)
   const [spectating, setSpectating] = useState(false)
   const [spectatorIndex, setSpectatorIndex] = useState(0)
+  const [heldAbility, setHeldAbility] = useState<RunnerAbility | null>(null)
+  const [feedback, setFeedback] = useState<string | null>(null)
   const input = useRef<RunnerControlSources>(createRunnerControlSources())
   const jumpQueued = useRef(false)
-  const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued }), [])
+  const abilityQueued = useRef(false)
+  const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued }), [])
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
   const match = stepMatch(rawMatch, elapsed)
+  const hellEvent = hellEventAt(elapsed)
   const finished = started && match.phase === 'finished'
   const winnerLabel = match.winner === 'runners' ? '도망자' : '지옥 간수'
 
@@ -535,6 +713,12 @@ export default function HellbreakGame() {
     const timer = window.setInterval(() => setElapsed((value) => Math.min(180, value + 0.1)), 100)
     return () => window.clearInterval(timer)
   }, [started, sceneReady, sceneError, finished])
+
+  useEffect(() => {
+    if (!feedback) return
+    const timeout = window.setTimeout(() => setFeedback(null), 2400)
+    return () => window.clearTimeout(timeout)
+  }, [feedback])
 
   useEffect(() => {
     if (!started || sceneReady || sceneError) return
@@ -563,6 +747,9 @@ export default function HellbreakGame() {
   const startMatch = () => {
     controls.input.current = createRunnerControlSources()
     controls.jumpQueued.current = false
+    controls.abilityQueued.current = false
+    setHeldAbility(null)
+    setFeedback(null)
     setElapsed(0)
     setDeaths(0)
     setPlayerEscaped(false)
@@ -577,6 +764,17 @@ export default function HellbreakGame() {
     setSceneError(message)
   }
 
+  const dangerStatus = feedback
+    ?? (hellEvent.phase === 'warning'
+      ? `${hellEvent.label} ${Math.ceil(hellEvent.secondsRemaining)}초 전`
+      : hellEvent.phase === 'active'
+        ? `지옥 간수 발동 · ${hellEvent.label}!`
+        : match.lavaPhase === 'warning'
+          ? `용암 폭발 경고 · ${Math.ceil(Math.max(0, 27 - (elapsed % 30)))}초`
+          : match.lavaPhase === 'surge'
+            ? '용암 폭발 상승! 더 높은 곳으로 이동하세요'
+            : null)
+
   const status = !started
     ? '봇 경기를 시작하세요'
     : sceneError
@@ -589,12 +787,12 @@ export default function HellbreakGame() {
         ? `도망자 ${spectatorIndex + 1} 관전 중 · Q/E로 변경`
         : playerEscaped
         ? '지옥 탈출 성공'
-        : '거대한 놀이터를 건너 탈출대로 올라가세요'
+        : dangerStatus ?? '거대한 놀이터를 건너 탈출대로 올라가세요'
 
   return (
     <main className={`shell${started && !finished ? ' playing' : ''}`}>
       <section className="hud" aria-label="게임 정보와 조작법">
-        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.2</div>
+        <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.3</div>
         <h1>HELL<span>BREAK</span></h1>
         <p className="tagline">올라가라. 간수를 속여라. 지옥을 탈출하라.</p>
         <div className="match-card">
@@ -603,8 +801,8 @@ export default function HellbreakGame() {
           <div><strong>{deaths}</strong><small>용암 사망</small></div>
         </div>
         <p className="brief">
-          거대한 미끄럼틀, 정글짐, 그네와 구름다리를 건너 최상단 탈출구에 도착하세요.
-          용암에 빠져 죽으면 Q와 E로 살아 있는 도망자를 관전할 수 있습니다.
+          거대한 미끄럼틀, 정글짐, 폭주 그네와 붕괴 구름다리를 건너 최상단 탈출구에 도착하세요.
+          30초마다 용암 파동이 솟구치며, 빛나는 능력 아이템은 한 번에 하나만 보유할 수 있습니다.
         </p>
         <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
           {!started ? '봇 경기 시작' : finished ? '다시 경기' : '경기 재시작'}
@@ -613,6 +811,7 @@ export default function HellbreakGame() {
           <li><kbd>WASD</kbd> 이동</li>
           <li><kbd>SPACE</kbd> 점프</li>
           <li><kbd>SHIFT</kbd> 달리기</li>
+          <li><kbd>F</kbd> 획득한 능력 사용</li>
           <li><kbd>DRAG</kbd> 시점 회전 · 휠 거리 조절</li>
           <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>
         </ul>
@@ -623,12 +822,20 @@ export default function HellbreakGame() {
             <GameScene
               elapsed={elapsed}
               lavaHeight={match.lavaHeight}
+              event={hellEvent}
               active={started && sceneReady && !finished && !playerEscaped && !spectating}
               playerEscaped={playerEscaped}
+              heldAbility={heldAbility}
               resetToken={resetToken}
               controls={controls}
               spectating={spectating}
               spectatorIndex={spectatorIndex}
+              onPickupAbility={(ability) => {
+                setHeldAbility((current: RunnerAbility | null) => pickupAbility(current, ability))
+                setFeedback(`${abilitySpec(ability).label} 획득`)
+              }}
+              onConsumeAbility={() => setHeldAbility(null)}
+              onFeedback={setFeedback}
               onDeath={() => {
                 setDeaths((value: number) => value + 1)
                 setSpectating(true)
@@ -659,6 +866,21 @@ export default function HellbreakGame() {
         )}
         <div className="scanline" />
         <div className="game-banner">{status}</div>
+        {started && sceneReady && !finished && (
+          <div className={`danger-chip ${hellEvent.phase}`}>
+            간수 · {hellEvent.label} · {hellEvent.phase === 'warning' ? `${Math.ceil(hellEvent.secondsRemaining)}초 전` : hellEvent.phase === 'active' ? '발동' : '재정비'}
+          </div>
+        )}
+        {started && sceneReady && !finished && (
+          <div className={`lava-chip ${match.lavaPhase}`}>
+            용암 · {match.lavaPhase === 'calm' ? '상승 중' : match.lavaPhase === 'warning' ? '폭발 임박' : '폭발 상승'}
+          </div>
+        )}
+        {heldAbility && started && sceneReady && !finished && (
+          <div className="ability-chip" style={{ borderColor: abilitySpec(heldAbility).color }}>
+            F · {abilitySpec(heldAbility).label}
+          </div>
+        )}
         {started && sceneReady && !finished && !playerEscaped && !spectating && (
           <div className="camera-hint">화면 드래그 · 시점 회전</div>
         )}
@@ -674,7 +896,7 @@ export default function HellbreakGame() {
           </div>
         )}
         {started && sceneReady && !finished && !playerEscaped && !spectating && (
-          <MobileControls controls={controls} />
+          <MobileControls controls={controls} heldAbility={heldAbility} />
         )}
         <div className="status"><i /> NEXT.JS 로컬 게임 실행 중</div>
       </section>

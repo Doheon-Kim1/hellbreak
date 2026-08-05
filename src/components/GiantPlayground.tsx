@@ -1,7 +1,10 @@
 'use client'
 
+import { useFrame } from '@react-three/fiber'
 import { RigidBody } from '@react-three/rapier'
-import { useMemo } from 'react'
+import type { RapierRigidBody } from '@react-three/rapier'
+import { useMemo, useRef } from 'react'
+import type { HellEventState } from '../game/hell-events'
 import { PLAYGROUND_ROUTE } from '../game/playground'
 
 type Vec3 = [number, number, number]
@@ -36,6 +39,82 @@ function FixedBox({
         <meshStandardMaterial color={color} roughness={roughness} />
       </mesh>
     </RigidBody>
+  )
+}
+
+function InfernalSweep() {
+  const body = useRef<RapierRigidBody>(null)
+  useFrame(({ clock }) => {
+    if (!body.current) return
+    const time = clock.elapsedTime
+    body.current.setNextKinematicTranslation({
+      x: -22 + Math.sin(time * 2.8) * 5.2,
+      y: -1.15,
+      z: 19,
+    })
+  })
+
+  return (
+    <RigidBody ref={body} type="kinematicPosition" colliders="cuboid" position={[-22, -1.15, 19]}>
+      <mesh>
+        <boxGeometry args={[5.4, 0.45, 0.65]} />
+        <meshStandardMaterial color="#ff5b33" emissive="#ff2100" emissiveIntensity={2.4} />
+      </mesh>
+    </RigidBody>
+  )
+}
+
+function RotatingBeam() {
+  const body = useRef<RapierRigidBody>(null)
+  useFrame(({ clock }) => {
+    if (!body.current) return
+    const angle = clock.elapsedTime * 2.4
+    body.current.setNextKinematicTranslation({ x: -8, y: 0.05, z: 10 })
+    body.current.setNextKinematicRotation({ x: 0, y: Math.sin(angle / 2), z: 0, w: Math.cos(angle / 2) })
+  })
+
+  return (
+    <RigidBody ref={body} type="kinematicPosition" colliders="cuboid" position={[-8, 0.05, 10]}>
+      <mesh>
+        <boxGeometry args={[8.5, 0.32, 0.46]} />
+        <meshStandardMaterial color="#ffc928" emissive="#ff6200" emissiveIntensity={1.5} />
+      </mesh>
+    </RigidBody>
+  )
+}
+
+function SlideFireWall({ eventProgress }: { eventProgress: number }) {
+  const body = useRef<RapierRigidBody>(null)
+  const startZ = -15 + eventProgress * 14
+  useFrame(() => {
+    if (!body.current) return
+    body.current.setNextKinematicTranslation({
+      x: 10.8,
+      y: 3.9,
+      z: startZ,
+    })
+  })
+
+  return (
+    <RigidBody ref={body} type="kinematicPosition" colliders="cuboid" position={[10.8, 3.9, startZ]}>
+      <mesh>
+        <boxGeometry args={[7.8, 1.1, 0.55]} />
+        <meshStandardMaterial color="#ff8b24" emissive="#ff2600" emissiveIntensity={3} />
+      </mesh>
+      <pointLight color="#ff3100" intensity={20} distance={8} />
+    </RigidBody>
+  )
+}
+
+function PlaygroundHazards({ elapsed, event }: { elapsed: number; event: HellEventState }) {
+  const active = event.phase === 'active'
+  const eventProgress = active ? Math.min(1, Math.max(0, ((elapsed % 20) - 4) / 8)) : 0
+  return (
+    <>
+      {active && event.kind === 'swing-frenzy' && <InfernalSweep />}
+      {active && event.kind === 'swing-frenzy' && <RotatingBeam />}
+      {active && event.kind === 'slide-fire' && <SlideFireWall eventProgress={eventProgress} />}
+    </>
   )
 }
 
@@ -133,7 +212,8 @@ function EscapeLookout() {
   )
 }
 
-export function GiantPlayground() {
+export function GiantPlayground({ elapsed, event }: { elapsed: number; event: HellEventState }) {
+  const bridgeCollapsed = event.kind === 'bridge-collapse' && event.phase === 'active'
   return (
     <group>
       <FixedBox position={[0, -3.55, 0]} size={[90, 0.6, 90]} color={COLORS.rubber} roughness={0.94} />
@@ -143,16 +223,20 @@ export function GiantPlayground() {
       <GiantMonkeyBars />
       <GiantSlide />
       <EscapeLookout />
+      <PlaygroundHazards elapsed={elapsed} event={event} />
 
-      {PLAYGROUND_ROUTE.map((platform, index) => (
-        <FixedBox
-          key={index}
-          position={[platform.x, platform.y, platform.z]}
-          size={[platform.width, 0.28, 3.2]}
-          color={[COLORS.blue, COLORS.red, COLORS.yellow, COLORS.green][index % 4]}
-          roughness={0.58}
-        />
-      ))}
+      {PLAYGROUND_ROUTE.map((platform, index) => {
+        if (bridgeCollapsed && index >= 8 && index <= 10) return null
+        return (
+          <FixedBox
+            key={index}
+            position={[platform.x, platform.y, platform.z]}
+            size={[platform.width, 0.28, 3.2]}
+            color={[COLORS.blue, COLORS.red, COLORS.yellow, COLORS.green][index % 4]}
+            roughness={0.58}
+          />
+        )
+      })}
 
       {[-44, 44].flatMap((x) => [-44, 44].map((z) => (
         <FixedBox key={`${x}-${z}`} position={[x, 1.4, z]} size={[1.1, 10, 1.1]} color={COLORS.red} />

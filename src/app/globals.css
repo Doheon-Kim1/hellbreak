@@ -48,6 +48,14 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
 .key-art { position: absolute; z-index: 1; inset: 0; background-color: #09060d; background-position: center; background-size: cover; background-repeat: no-repeat; }
 .scanline { pointer-events: none; z-index: 2; position: absolute; inset: 0; opacity: .15; background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.05) 4px); }
 .game-banner { z-index: 3; position: absolute; top: 1.4rem; left: 50%; transform: translateX(-50%); padding: .55rem .85rem; border: 1px solid rgba(255, 116, 72, .35); background: rgba(9, 6, 13, .72); color: #ffb49c; backdrop-filter: blur(8px); font: 800 .65rem ui-monospace, monospace; letter-spacing: .12em; white-space: nowrap; }
+.danger-chip, .lava-chip, .ability-chip { pointer-events: none; z-index: 4; position: absolute; padding: .45rem .65rem; border: 1px solid rgba(255, 116, 72, .35); background: rgba(9, 6, 13, .78); backdrop-filter: blur(8px); font: 800 .58rem ui-monospace, monospace; letter-spacing: .08em; }
+.danger-chip { top: 4.2rem; left: 50%; transform: translateX(-50%); color: #ffc1a9; }
+.danger-chip.warning { border-color: #ffca6b; color: #ffe1a7; }
+.danger-chip.active { border-color: #ff3d18; color: #ff8d70; box-shadow: 0 0 24px rgba(255, 48, 16, .25); }
+.lava-chip { top: 6.55rem; left: 50%; transform: translateX(-50%); color: #ff9b66; }
+.lava-chip.warning { border-color: #ffcc5b; color: #ffe0a0; }
+.lava-chip.surge { border-color: #ff3217; color: white; background: rgba(105, 14, 7, .86); }
+.ability-chip { bottom: 1.4rem; left: 1.4rem; color: #f5ffff; }
 .spectator-controls { position: absolute; left: 50%; bottom: 3.5rem; display: flex; align-items: center; gap: .7rem; transform: translateX(-50%); padding: .5rem; border: 1px solid rgba(124, 247, 255, .28); background: rgba(7, 12, 18, .78); backdrop-filter: blur(8px); }
 .spectator-controls button { margin: 0; padding: .55rem .7rem; border-color: rgba(124, 247, 255, .45); color: #9befff; background: rgba(124, 247, 255, .06); font-size: .58rem; }
 .spectator-controls strong { min-width: 5.8rem; color: #e9fbff; text-align: center; font: 800 .62rem ui-monospace, monospace; letter-spacing: .1em; }
@@ -84,8 +92,11 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
   .shell.playing .match-card { margin: 0 0 .5rem; }
   .shell.playing .match-card div { padding: .45rem; }
   .shell.playing .hud > button { margin: 0; padding: .5rem .65rem; }
-  .shell.playing .game-banner { top: 6.2rem; max-width: calc(100vw - 1.2rem); overflow: hidden; text-overflow: ellipsis; }
-  .shell.playing .camera-hint { top: 9rem; right: .8rem; }
+  .shell.playing .game-banner { top: 8rem; max-width: calc(100vw - 1.2rem); overflow: hidden; text-overflow: ellipsis; }
+  .shell.playing .camera-hint { display: none; }
+  .shell.playing .danger-chip { top: 10.7rem; right: max(.65rem, env(safe-area-inset-right)); left: auto; max-width: 13rem; transform: none; }
+  .shell.playing .lava-chip { top: 13.1rem; right: max(.65rem, env(safe-area-inset-right)); left: auto; transform: none; }
+  .shell.playing .ability-chip { right: max(.8rem, env(safe-area-inset-right)); bottom: calc(max(.8rem, env(safe-area-inset-bottom)) + 5.4rem); left: auto; }
   .shell.playing .status { display: none; }
 
   .mobile-controls {
@@ -124,6 +135,7 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
   .mobile-dpad .right { right: 0; bottom: 0; }
   .mobile-actions { display: flex; align-items: flex-end; gap: .65rem; }
   .mobile-actions button { width: 4rem; height: 4rem; font-size: .62rem; }
+  .mobile-actions .ability { border-color: #70f6ff; color: #c9fbff; background: rgba(24, 103, 118, .32); }
   .mobile-actions .jump { width: 4.8rem; height: 4.8rem; border-color: #ff7048; color: white; background: rgba(255, 74, 28, .3); }
 }
 
