@@ -61,7 +61,7 @@ kbd { color: #d6cad2; font: 700 .65rem ui-monospace, monospace; }
   ul { flex-wrap: wrap; }
 
   .shell.playing { display: block; height: 100dvh; min-height: 100dvh; overflow: hidden; }
-  .shell.playing .viewport { width: 100%; min-height: 100dvh; }
+  .shell.playing .viewport { width: 100%; height: 100dvh; min-height: 100dvh; }
   .shell.playing .hud {
     position: absolute;
     z-index: 5;
