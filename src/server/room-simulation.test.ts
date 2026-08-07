@@ -1,8 +1,64 @@
 import { describe, expect, it } from 'vitest'
-import { applyPlayerInput, createRoomState, joinRoom, leaveRoom, stepRoom } from './room-simulation'
+import { applyPlayerInput, createRoomState, joinRoom, leaveRoom, publicRoomSnapshot, stepRoom } from './room-simulation'
 import type { PlayerInputCommand } from './room-simulation'
 
 describe('authoritative multiplayer room', () => {
+  it('assigns deterministic spawn slots and reuses a released slot', () => {
+    let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+    room = joinRoom(room, 'runner-2', 'session-b')
+
+    expect(room.players['runner-1']).toMatchObject({ x: 0, y: -2.2, z: 0, spawnSlot: 0 })
+    expect(room.players['runner-2']).toMatchObject({ x: 1.5, y: -2.2, z: 0, spawnSlot: 1 })
+
+    room = leaveRoom(room, 'session-a')
+    room = joinRoom(room, 'runner-3', 'session-c')
+    expect(room.players['runner-3']).toMatchObject({ x: 0, y: -2.2, z: 0, spawnSlot: 0 })
+  })
+
+  it('rotates forward input by validated camera yaw on the server', () => {
+    let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+    room = applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      forward: true,
+      cameraYaw: Math.PI / 2,
+    })
+    room = stepRoom(room, 0.1)
+
+    expect(room.players['runner-1'].x).toBeCloseTo(-0.58)
+    expect(room.players['runner-1'].z).toBeCloseTo(0)
+  })
+
+  it('rejects non-finite camera yaw', () => {
+    const room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+
+    expect(applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      forward: true,
+      cameraYaw: Number.NaN,
+    })).toEqual(room)
+    expect(applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      forward: true,
+      cameraYaw: Number.POSITIVE_INFINITY,
+    })).toEqual(room)
+  })
+
+  it('keeps private ownership and raw input out of public snapshots', () => {
+    let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+    room = applyPlayerInput(room, 'session-a', { sequence: 1, right: true, cameraYaw: 0 })
+
+    const snapshot = publicRoomSnapshot(room)
+    expect(snapshot).toEqual({
+      elapsed: 0,
+      players: {
+        'runner-1': { id: 'runner-1', x: 0, y: -2.2, z: 0, lastProcessedInput: 1 },
+      },
+    })
+    expect(JSON.stringify(snapshot)).not.toContain('session-a')
+    expect(JSON.stringify(snapshot)).not.toContain('input')
+    expect(JSON.stringify(snapshot)).not.toContain('spawnSlot')
+  })
+
   it('moves players from authenticated session input with a bounded tick', () => {
     let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
     room = applyPlayerInput(room, 'session-a', { sequence: 1, forward: true, sprint: true })
@@ -22,7 +78,7 @@ describe('authoritative multiplayer room', () => {
     room = applyPlayerInput(room, 'session-a', { sequence: 1, right: true })
     room = stepRoom(room, 0.1)
     expect(room.players['runner-1'].x).toBeCloseTo(0.58)
-    expect(room.players['runner-2'].x).toBe(0)
+    expect(room.players['runner-2'].x).toBe(1.5)
   })
 
   it('ignores stale input sequences', () => {
