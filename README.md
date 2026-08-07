@@ -18,14 +18,19 @@
 
 ```bash
 npm ci
-npm run dev
+npm run dev          # Next.js :5173 + Colyseus :2567
 npm test
+npm run test:e2e
 npm run lint
 npm run build
-npm start
+npm run start:room   # 실시간 룸 서버
+npm start            # 프로덕션 웹 앱
 ```
 
 개발 서버를 시작한 뒤 `http://localhost:5173`을 여세요.
+
+배포된 웹 앱에서 온라인 룸을 사용하려면 빌드 시 `NEXT_PUBLIC_GAME_SERVER_URL`을 HTTPS Colyseus 서버 주소로 설정해야 합니다. 브라우저 SDK가 매치메이킹 요청과 WebSocket 프로토콜을 자동으로 선택하므로 `https://rooms.example.com` 형태를 사용합니다.
+룸 서버에는 `HELLBREAK_ALLOWED_ORIGINS=https://game.example.com`처럼 접속을 허용할 웹 Origin을 쉼표로 구분해 설정합니다. 기본값은 로컬 개발 Origin 두 개뿐입니다.
 
 ## 현재 플레이 가능한 범위
 
@@ -40,6 +45,11 @@ npm start
 - 발판 대기와 포물선 점프를 사용하는 도망자 봇 3명
 - Q/E 관전 대상 전환과 봇 추적 카메라
 - 경기 시작, 재시작, 탈출, 봇 승리, 리매치 루프
+- 룸 생성과 룸 ID 참가, 최대 6명 접속·퇴장 동기화
+- 20Hz Colyseus 권위 서버의 수평 이동·카메라 방향·입력 sequence 검증
+- 서버 위치 기반 로컬·원격 아바타 렌더링과 부드러운 보간
+
+현재 온라인 모드는 네트워크 기반 검증 단계로 `x/z` 수평 이동만 동기화합니다. 점프, 서버 물리, 용암, 아이템, 전투와 HIVE 인증·매치메이킹은 후속 범위입니다.
 
 ## MVP 범위
 
@@ -63,5 +73,8 @@ HIVE 매치메이킹은 입장할 룸을 선택하거나 할당합니다. 프레
 - GitHub Pages: https://doheon-kim1.github.io/hellbreak/
 - GitHub Pages 수동 배포: `npm run deploy:pages`
 - Vercel: 추후 연결 예정
+
+GitHub Pages는 정적 웹 호스팅이므로 Colyseus 서버를 실행하지 않습니다. 서버 URL이 없는 Pages 빌드에서는 로컬 봇 경기는 계속 플레이할 수 있고 온라인 룸은 비활성 상태로 안내됩니다.
+현재 룸은 인증 없는 로컬 게스트 검증용입니다. HIVE의 짧은 수명 룸 토큰과 생성 제한을 연결하기 전에는 Colyseus 프로세스를 공개 인터넷에 배포하지 않습니다.
 
 아키텍처는 [`docs/architecture.md`](docs/architecture.md), 놀이터 참고 자료는 [`docs/playground-reference.md`](docs/playground-reference.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.

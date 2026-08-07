@@ -17,7 +17,10 @@ import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/moveme
 import { createMatch, stepMatch } from '../game/match'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
+import { useHellbreakRoom } from '../network/use-hellbreak-room'
+import type { MultiplayerInputCommand, NetworkPlayerSnapshot } from '../shared/multiplayer-protocol'
 import { GiantPlayground } from './GiantPlayground'
+import { MultiplayerLobby } from './MultiplayerLobby'
 
 const PLAYER_SPEED = 5.8
 const SPRINT_SPEED = 8.2
@@ -87,13 +90,15 @@ function GameCamera({
   elapsed,
   spectatorIndex,
   resetToken,
+  networkTarget,
 }: {
-  player: RefObject<RapierRigidBody | null>
+  player: RefObject<RapierRigidBody | null> | null
   orbit: RefObject<CameraOrbit>
-  mode: 'player' | 'spectator'
+  mode: 'player' | 'spectator' | 'network'
   elapsed: number
   spectatorIndex: number
   resetToken: number
+  networkTarget?: RefObject<Vector3 | null>
 }) {
   const { camera, gl } = useThree()
   const desired = useMemo(() => new Vector3(), [])
@@ -104,7 +109,7 @@ function GameCamera({
   }, [orbit, resetToken])
 
   useEffect(() => {
-    if (mode !== 'player') return
+    if (mode === 'spectator') return
     const canvas = gl.domElement
     let drag: { pointerId: number; x: number; y: number } | null = null
 
@@ -156,9 +161,8 @@ function GameCamera({
       desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
       lookAt.set(pose.x, pose.y + 0.55, pose.z)
     } else {
-      const body = player.current
-      if (!body) return
-      const position = body.translation()
+      const position = mode === 'network' ? networkTarget?.current : player?.current?.translation()
+      if (!position) return
       const offset = cameraOrbitOffset(orbit.current)
       lookAt.set(position.x, position.y + 0.75, position.z)
       desired.set(lookAt.x + offset.x, lookAt.y + offset.y, lookAt.z + offset.z)
@@ -352,6 +356,91 @@ function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
         emissiveIntensity={pose.escaped ? 1.5 : 0.45}
       />
     </mesh>
+  )
+}
+
+function NetworkAvatar({
+  player,
+  isOwn,
+  ownPosition,
+}: {
+  player: NetworkPlayerSnapshot
+  isOwn: boolean
+  ownPosition: RefObject<Vector3 | null>
+}) {
+  const avatar = useRef<Mesh>(null)
+  const target = useRef(new Vector3(player.x, player.y, player.z)).current
+
+  useEffect(() => {
+    target.set(player.x, player.y, player.z)
+  }, [player.x, player.y, player.z, target])
+
+  useFrame((_, delta) => {
+    if (!avatar.current) return
+    avatar.current.position.lerp(target, 1 - Math.exp(-delta * 12))
+    if (isOwn) ownPosition.current = avatar.current.position
+  })
+
+  return (
+    <mesh ref={avatar} position={[player.x, player.y, player.z]} castShadow>
+      <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
+      <meshStandardMaterial
+        color={isOwn ? '#f8f3ff' : '#7cf7ff'}
+        emissive={isOwn ? '#5527a8' : '#164d62'}
+        emissiveIntensity={0.7}
+      />
+      <pointLight color={isOwn ? '#b87cff' : '#7cf7ff'} intensity={3} distance={2.5} />
+    </mesh>
+  )
+}
+
+function NetworkTower({
+  players,
+  ownPlayerId,
+  controls,
+  active,
+  sendInput,
+}: {
+  players: NetworkPlayerSnapshot[]
+  ownPlayerId: string
+  controls: RunnerControls
+  active: boolean
+  sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
+}) {
+  const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
+  const ownPosition = useRef<Vector3 | null>(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
+  useRunnerControls(controls)
+
+  useEffect(() => {
+    if (!active) return
+    const timer = window.setInterval(() => {
+      const input = readRunnerInput(controls.input.current)
+      sendInput({ ...input, cameraYaw: cameraOrbit.current.yaw })
+    }, 50)
+    return () => window.clearInterval(timer)
+  }, [active, controls, sendInput])
+
+  return (
+    <>
+      <GiantPlayground elapsed={0} event={hellEventAt(0)} />
+      <GameCamera
+        player={null}
+        orbit={cameraOrbit}
+        mode="network"
+        elapsed={0}
+        spectatorIndex={0}
+        resetToken={0}
+        networkTarget={ownPosition}
+      />
+      {players.map((player) => (
+        <NetworkAvatar
+          key={player.id}
+          player={player}
+          isOwn={player.id === ownPlayerId}
+          ownPosition={ownPosition}
+        />
+      ))}
+    </>
   )
 }
 
@@ -619,6 +708,46 @@ function GameScene({
   )
 }
 
+function NetworkGameScene({
+  players,
+  ownPlayerId,
+  controls,
+  sendInput,
+  onReady,
+  onFailure,
+}: {
+  players: NetworkPlayerSnapshot[]
+  ownPlayerId: string
+  controls: RunnerControls
+  sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
+  onReady: () => void
+  onFailure: (message: string) => void
+}) {
+  return (
+    <Canvas
+      camera={{ position: [7, 3, 8], fov: 48 }}
+      dpr={[1, 1.5]}
+      gl={{ antialias: false, powerPreference: 'high-performance' }}
+    >
+      <color attach="background" args={['#09060d']} />
+      <fog attach="fog" args={['#160911', 35, 105]} />
+      <ambientLight intensity={0.8} />
+      <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
+      <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
+      <Physics gravity={[0, -18, 0]}>
+        <SceneHealth onReady={onReady} onFailure={onFailure} />
+        <NetworkTower
+          players={players}
+          ownPlayerId={ownPlayerId}
+          controls={controls}
+          active
+          sendInput={sendInput}
+        />
+      </Physics>
+    </Canvas>
+  )
+}
+
 function MobileControls({ controls, heldAbility }: { controls: RunnerControls; heldAbility: RunnerAbility | null }) {
   const holdProps = (control: RunnerControl) => {
     const setPointer = (event: ReactPointerEvent<HTMLButtonElement>, pressed: boolean) => {
@@ -685,6 +814,7 @@ function formatTime(seconds: number) {
 }
 
 export default function HellbreakGame() {
+  const [gameMode, setGameMode] = useState<'local' | 'online'>('local')
   const [started, setStarted] = useState(false)
   const [sceneReady, setSceneReady] = useState(false)
   const [sceneError, setSceneError] = useState<string | null>(null)
@@ -700,6 +830,8 @@ export default function HellbreakGame() {
   const jumpQueued = useRef(false)
   const abilityQueued = useRef(false)
   const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued }), [])
+  const network = useHellbreakRoom()
+  const onlineConnected = gameMode === 'online' && network.status === 'connected'
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
@@ -709,10 +841,10 @@ export default function HellbreakGame() {
   const winnerLabel = match.winner === 'runners' ? '도망자' : '지옥 간수'
 
   useEffect(() => {
-    if (!started || !sceneReady || sceneError || finished) return
+    if (gameMode !== 'local' || !started || !sceneReady || sceneError || finished) return
     const timer = window.setInterval(() => setElapsed((value) => Math.min(180, value + 0.1)), 100)
     return () => window.clearInterval(timer)
-  }, [started, sceneReady, sceneError, finished])
+  }, [gameMode, started, sceneReady, sceneError, finished])
 
   useEffect(() => {
     if (!feedback) return
@@ -721,13 +853,13 @@ export default function HellbreakGame() {
   }, [feedback])
 
   useEffect(() => {
-    if (!started || sceneReady || sceneError) return
+    if ((gameMode === 'local' ? !started : !onlineConnected) || sceneReady || sceneError) return
     const timeout = window.setTimeout(
       () => setSceneError('3D 엔진이 응답하지 않습니다. 페이지를 다시 불러와 주세요.'),
       8000,
     )
     return () => window.clearTimeout(timeout)
-  }, [started, sceneReady, sceneError])
+  }, [gameMode, onlineConnected, started, sceneReady, sceneError])
 
   useEffect(() => {
     if (!spectating) return
@@ -743,6 +875,21 @@ export default function HellbreakGame() {
     window.addEventListener('keydown', switchRunner)
     return () => window.removeEventListener('keydown', switchRunner)
   }, [spectating])
+
+  const selectMode = (nextMode: 'local' | 'online') => {
+    controls.input.current = createRunnerControlSources()
+    controls.jumpQueued.current = false
+    controls.abilityQueued.current = false
+    setSceneReady(false)
+    setSceneError(null)
+    setGameMode(nextMode)
+    if (nextMode === 'online') {
+      setStarted(false)
+      setSpectating(false)
+    } else {
+      void network.leave()
+    }
+  }
 
   const startMatch = () => {
     controls.input.current = createRunnerControlSources()
@@ -775,7 +922,7 @@ export default function HellbreakGame() {
             ? '용암 폭발 상승! 더 높은 곳으로 이동하세요'
             : null)
 
-  const status = !started
+  const localStatus = !started
     ? '봇 경기를 시작하세요'
     : sceneError
       ? '3D 화면 오류 · 다시 불러오기가 필요합니다'
@@ -788,36 +935,72 @@ export default function HellbreakGame() {
         : playerEscaped
         ? '지옥 탈출 성공'
         : dangerStatus ?? '거대한 놀이터를 건너 탈출대로 올라가세요'
+  const status = gameMode === 'local'
+    ? localStatus
+    : network.status === 'unavailable'
+      ? '온라인 룸 서버 주소가 필요합니다'
+      : network.status === 'connecting'
+        ? '온라인 룸 연결 중…'
+        : network.status === 'connected'
+          ? sceneReady ? `온라인 룸 · 참가자 ${network.players.length}/6` : '온라인 놀이터 준비 중…'
+          : network.status === 'error'
+            ? network.error ?? '온라인 룸 오류'
+            : '룸을 만들거나 룸 ID로 참가하세요'
 
   return (
-    <main className={`shell${started && !finished ? ' playing' : ''}`}>
+    <main className={`shell${(gameMode === 'local' ? started && !finished : onlineConnected) ? ' playing' : ''}`}>
       <section className="hud" aria-label="게임 정보와 조작법">
         <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.3</div>
         <h1>HELL<span>BREAK</span></h1>
         <p className="tagline">올라가라. 간수를 속여라. 지옥을 탈출하라.</p>
-        <div className="match-card">
-          <div><strong>{3 - escapedBots}</strong><small>등반 중인 봇</small></div>
-          <div><strong>{formatTime(elapsed)}</strong><small>남은 시간</small></div>
-          <div><strong>{deaths}</strong><small>용암 사망</small></div>
+        <div className="mode-switch" aria-label="게임 모드">
+          <button type="button" className={gameMode === 'local' ? 'selected' : ''} onClick={() => selectMode('local')}>
+            봇 경기
+          </button>
+          <button type="button" className={gameMode === 'online' ? 'selected' : ''} onClick={() => selectMode('online')}>
+            온라인
+          </button>
         </div>
-        <p className="brief">
-          거대한 미끄럼틀, 정글짐, 폭주 그네와 붕괴 구름다리를 건너 최상단 탈출구에 도착하세요.
-          30초마다 용암 파동이 솟구치며, 빛나는 능력 아이템은 한 번에 하나만 보유할 수 있습니다.
-        </p>
-        <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
-          {!started ? '봇 경기 시작' : finished ? '다시 경기' : '경기 재시작'}
-        </button>
+        {gameMode === 'local' ? (
+          <>
+            <div className="match-card">
+              <div><strong>{3 - escapedBots}</strong><small>등반 중인 봇</small></div>
+              <div><strong>{formatTime(elapsed)}</strong><small>남은 시간</small></div>
+              <div><strong>{deaths}</strong><small>용암 사망</small></div>
+            </div>
+            <p className="brief">
+              거대한 미끄럼틀, 정글짐, 폭주 그네와 붕괴 구름다리를 건너 최상단 탈출구에 도착하세요.
+              30초마다 용암 파동이 솟구치며, 빛나는 능력 아이템은 한 번에 하나만 보유할 수 있습니다.
+            </p>
+            <button type="button" className={started && !finished ? 'active-match' : ''} onClick={startMatch}>
+              {!started ? '봇 경기 시작' : finished ? '다시 경기' : '경기 재시작'}
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="brief">룸을 만들거나 공유받은 ID로 참가해 최대 6명의 서버 권위 수평 이동을 확인하세요.</p>
+            <MultiplayerLobby
+              status={network.status}
+              roomId={network.roomId}
+              playerCount={network.players.length}
+              error={network.error}
+              onCreate={() => void network.createRoom()}
+              onJoin={(roomId) => void network.joinRoom(roomId)}
+              onLeave={network.leave}
+            />
+          </>
+        )}
         <ul>
           <li><kbd>WASD</kbd> 이동</li>
-          <li><kbd>SPACE</kbd> 점프</li>
+          {gameMode === 'local' && <li><kbd>SPACE</kbd> 점프</li>}
           <li><kbd>SHIFT</kbd> 달리기</li>
-          <li><kbd>F</kbd> 획득한 능력 사용</li>
+          {gameMode === 'local' && <li><kbd>F</kbd> 획득한 능력 사용</li>}
           <li><kbd>DRAG</kbd> 시점 회전 · 휠 거리 조절</li>
-          <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>
+          {gameMode === 'local' && <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>}
         </ul>
       </section>
-      <section className="viewport" aria-label="플레이 가능한 거대 놀이터 3D 봇 경기">
-        {!sceneError && (
+      <section className="viewport" aria-label="플레이 가능한 거대 놀이터 3D 경기">
+        {!sceneError && gameMode === 'local' && (
           <SceneErrorBoundary onError={handleSceneFailure}>
             <GameScene
               elapsed={elapsed}
@@ -849,7 +1032,22 @@ export default function HellbreakGame() {
             />
           </SceneErrorBoundary>
         )}
-        {sceneCoverVisible(started, sceneReady) && (
+        {!sceneError && onlineConnected && (
+          <SceneErrorBoundary onError={handleSceneFailure}>
+            <NetworkGameScene
+              players={network.players}
+              ownPlayerId={network.ownPlayerId}
+              controls={controls}
+              sendInput={network.sendInput}
+              onReady={() => {
+                setSceneReady(true)
+                setSceneError(null)
+              }}
+              onFailure={handleSceneFailure}
+            />
+          </SceneErrorBoundary>
+        )}
+        {(gameMode === 'local' ? sceneCoverVisible(started, sceneReady) : !onlineConnected || !sceneReady) && (
           <div
             className="key-art"
             style={{ backgroundImage: `url(${KEY_ART_URL})` }}
@@ -866,25 +1064,25 @@ export default function HellbreakGame() {
         )}
         <div className="scanline" />
         <div className="game-banner">{status}</div>
-        {started && sceneReady && !finished && (
+        {gameMode === 'local' && started && sceneReady && !finished && (
           <div className={`danger-chip ${hellEvent.phase}`}>
             간수 · {hellEvent.label} · {hellEvent.phase === 'warning' ? `${Math.ceil(hellEvent.secondsRemaining)}초 전` : hellEvent.phase === 'active' ? '발동' : '재정비'}
           </div>
         )}
-        {started && sceneReady && !finished && (
+        {gameMode === 'local' && started && sceneReady && !finished && (
           <div className={`lava-chip ${match.lavaPhase}`}>
             용암 · {match.lavaPhase === 'calm' ? '상승 중' : match.lavaPhase === 'warning' ? '폭발 임박' : '폭발 상승'}
           </div>
         )}
-        {heldAbility && started && sceneReady && !finished && (
+        {gameMode === 'local' && heldAbility && started && sceneReady && !finished && (
           <div className="ability-chip" style={{ borderColor: abilitySpec(heldAbility).color }}>
             F · {abilitySpec(heldAbility).label}
           </div>
         )}
-        {started && sceneReady && !finished && !playerEscaped && !spectating && (
+        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || onlineConnected) && sceneReady && (
           <div className="camera-hint">화면 드래그 · 시점 회전</div>
         )}
-        {spectating && !finished && (
+        {gameMode === 'local' && spectating && !finished && (
           <div className="spectator-controls" aria-label="관전 대상 변경">
             <button type="button" onClick={() => setSpectatorIndex((current: number) => cycleSpectatorIndex(current, -1, 3))}>
               Q · 이전
@@ -895,10 +1093,24 @@ export default function HellbreakGame() {
             </button>
           </div>
         )}
-        {started && sceneReady && !finished && !playerEscaped && !spectating && (
-          <MobileControls controls={controls} heldAbility={heldAbility} />
+        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || onlineConnected) && sceneReady && (
+          <MobileControls controls={controls} heldAbility={gameMode === 'local' ? heldAbility : null} />
         )}
-        <div className="status"><i /> NEXT.JS 로컬 게임 실행 중</div>
+        {gameMode === 'online' && network.status === 'connected' && (
+          <div className="network-position-debug" aria-live="polite">
+            {network.players.map((player) => (
+              <span
+                key={player.id}
+                data-testid="network-player"
+                data-player-id={player.id}
+                data-own={String(player.id === network.ownPlayerId)}
+              >
+                {player.id === network.ownPlayerId ? '나' : player.id.slice(0, 4)} · {player.x.toFixed(2)}, {player.z.toFixed(2)}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="status"><i /> {gameMode === 'online' ? 'COLYSEUS 권위 룸' : 'NEXT.JS 로컬 게임'} 실행 중</div>
       </section>
     </main>
   )

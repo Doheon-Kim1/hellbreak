@@ -44,7 +44,22 @@ It already enforces the core Room Host boundary:
 - each room is limited to six authenticated players and disconnects remove input ownership immediately;
 - room state advances only through the server tick function.
 
-The upcoming Colyseus adapter will translate room messages into these tested commands and broadcast the resulting snapshots. This keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
+## Implemented Colyseus room adapter
+
+`src/server/hellbreak-room.ts` wraps the transport-independent simulation in a Colyseus room:
+
+- `HellbreakRoomState` and `PlayerSchema` broadcast the authoritative player map;
+- room creation and `joinById` use server-issued room and session IDs;
+- input messages contain directional booleans, sprint, camera yaw, and a monotonic sequence number—never client coordinates;
+- a 20 Hz server tick advances the simulation and publishes `x/y/z` plus the last processed input sequence;
+- clients receive join, movement, and disconnect patches through `@colyseus/sdk`;
+- the browser interpolates rendered avatars toward the latest server position.
+
+`src/server/colyseus-server.ts` runs the WebSocket process separately from Next.js on port 2567 and provides `/health`. Development uses `npm run dev` to start both processes. Browser E2E coverage creates two isolated contexts, joins them to one room, moves one participant, observes the movement from the other, and verifies disconnect cleanup.
+
+The current network slice deliberately synchronizes only horizontal `x/z` movement. The server keeps `y` at its assigned spawn height until server-side Rapier collision and vertical movement are introduced. This prevents the browser from becoming authoritative over jump or climb coordinates.
+
+The adapter keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
 
 ## MVP rollout
 

@@ -33,6 +33,16 @@ describe('Colyseus HELLBREAK room', () => {
     shutdown = running.shutdown
     const address = running.httpServer.address() as { port: number }
     const endpoint = `ws://127.0.0.1:${address.port}`
+    const httpEndpoint = `http://127.0.0.1:${address.port}`
+    const rejectedOrigin = await fetch(`${httpEndpoint}/health`, {
+      headers: { Origin: 'https://untrusted.example' },
+    })
+    expect(rejectedOrigin.status).toBe(403)
+    const allowedOrigin = await fetch(`${httpEndpoint}/health`, {
+      headers: { Origin: 'http://localhost:5173' },
+    })
+    expect(allowedOrigin.status).toBe(200)
+    expect(allowedOrigin.headers.get('access-control-allow-origin')).toBe('http://localhost:5173')
     const clientA = new Client(endpoint)
     const clientB = new Client(endpoint)
 
