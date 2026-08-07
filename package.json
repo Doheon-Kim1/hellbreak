@@ -4,9 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 5173",
-    "build": "next build",
+    "dev": "concurrently --kill-others --names web,room \"npm:dev:web\" \"npm:dev:room\"",
+    "dev:web": "next dev -p 5173",
+    "dev:room": "tsx watch src/server/colyseus-server.ts",
+    "build": "npm run build:room && npm run build:web",
+    "build:web": "next build",
+    "build:room": "tsc --noEmit -p tsconfig.server.json",
     "start": "next start -p 5173",
+    "start:room": "tsx src/server/colyseus-server.ts",
     "lint": "oxlint .",
     "test": "vitest run src",
     "test:watch": "vitest src",
@@ -14,9 +19,14 @@
     "deploy:pages": "bash scripts/deploy-github-pages.sh"
   },
   "dependencies": {
+    "@colyseus/core": "^0.17.48",
+    "@colyseus/schema": "^4.0.30",
+    "@colyseus/sdk": "^0.17.43",
+    "@colyseus/ws-transport": "^0.17.13",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.7.0",
     "@react-three/rapier": "^2.2.0",
+    "express": "^5.2.1",
     "next": "^16.3.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -25,12 +35,15 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.185.3",
+    "concurrently": "^10.0.4",
     "oxlint": "^1.75.0",
     "sharp": "^0.35.3",
+    "tsx": "^4.23.10",
     "typescript": "~6.0.2",
     "vitest": "^4.1.10"
   }

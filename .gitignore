@@ -17,6 +17,7 @@ test-results
 dist-ssr
 *.tsbuildinfo
 *.local
+.hermes
 
 # Editor directories and files
 .vscode/*
