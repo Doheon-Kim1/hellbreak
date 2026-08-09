@@ -162,6 +162,106 @@ The current network slice uses deterministic server-side kinematic collision for
 
 The adapter keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
 
+## Implemented HIVE boundary (Phase 3A)
+
+The server side of identity and matchmaking now exists, behind configuration. Nothing about it
+claims a live HIVE connection: no credentials are present, and the routes say so out loud.
+
+### Explicit multiplayer mode split
+
+`src/shared/multiplayer-modes.ts` decides, as pure logic, which online branches may be offered:
+
+- **guest** — the deployed demo. Available whenever a Colyseus address is configured, including on
+  the static Pages build. This is the fallback and it is never coupled to HIVE rollout.
+- **hive** — the authenticated queue. Closed unless the build, the browser login flow, and the
+  server all say it exists, checked in that order so the sentence a player reads is the first thing
+  that would actually have to change:
+  `static-export` → `login-unwired` → `capability-unknown` → `server-unconfigured`.
+
+The lobby renders both branches always; a closed one is disabled with its reason next to it. No
+explanation names an environment variable. `useMultiplayerModes` probes `GET /api/hive/session`
+only when a probe could still change the answer, so the Pages build makes no request at all.
+
+### Server boundary
+
+| Module | Owns |
+| --- | --- |
+| `src/server/hive/config.ts` | Env validation; reports missing/invalid keys **by name only** |
+| `src/server/hive/contracts.ts` | The normalized types the rest of the app sees; HIVE payloads stop here |
+| `src/server/hive/transport.ts` | The only outbound call: 5 s timeout, 64 KB streaming ceiling, `redirect: 'error'` |
+| `src/server/hive/auth.ts` | Authentication v4 token verification, exactly as documented |
+| `src/server/hive/matchmaking.ts` | Private Match enqueue/status/cancel, exactly as documented |
+| `src/server/hive/allocation.ts` | Where a matched player is told to connect — the seam the match result callback will fill, validated on write against the room token's own id rules |
+| `src/server/hive/session.ts` | Signed, HttpOnly, `SameSite=Strict` browser session; carries no access token |
+| `src/server/hive/sign-room-token.ts` | The short-lived room join capability |
+| `src/server/hive/routes.ts` | The three route handlers as pure functions |
+
+`src/app/api/hive/*/route.ts` are three-line adapters over those factories. Because every one is a
+`route.ts` and the Pages build recognises only `.tsx` pages, none of this tree exists in the static
+export. A build scan of `out/` confirms no `api/` file, no session cookie name, no signing or crypto
+code, and no HIVE upstream URL; the client probe's own URL constant is still in the bundle but is
+never requested, because the inlined `NEXT_PUBLIC_STATIC_EXPORT` closes the branch first.
+
+Two rules the routes enforce that are easy to lose later: identity comes from the session cookie and
+the room comes from the allocator, so a body field named `playerId` or `roomId` is **rejected**
+rather than ignored; and an unconfigured deployment answers `503` with the missing key names instead
+of failing open.
+
+Request bodies are bounded by what is actually read, not by what the caller declares. `Content-Length`
+is checked first because an honest oversized caller can be refused without touching the socket, but
+the body is then pulled a chunk at a time and counted in bytes, the stream is cancelled the moment
+it passes 2 KB, and nothing is decoded or parsed before that count is known. A chunked body that
+declares no length, or a false one, is refused with `413` without buffering the rest.
+
+Because the allocator's writer is an upstream contract that does not exist yet, an assignment is
+checked against the room token's identifier rules **where it is written** and refused by name, and
+`/api/hive/room-token` re-checks what it reads back. An unsignable room id is a `409` naming the
+broken allocation, never a `500` from the signer. Expiry is decided by an injected clock — the same
+one the routes read — and never inferred from the expiry being written, so a long match cannot evict
+everyone else's live assignment; an allocation that is already expired when it arrives is refused
+rather than stored. Cancelling or re-queueing invalidates the player's assignment **before** HIVE is
+called, so an upstream failure cannot leave an abandoned room signable.
+
+### Room join capability
+
+One signing primitive backs both the session cookie and the room capability, with the audience mixed
+into the MAC so they can never be swapped. A capability binds four things and the room checks all
+four:
+
+| Claim | Enforced by |
+| --- | --- |
+| identity (`sub`) | one seat per identity in a room |
+| assigned room (`room`) | must equal the match the room was claimed for |
+| lifetime (`iat`/`exp`) | bounded clock skew, plus a TTL ceiling checked on verification too |
+| nonce (`jti`) | single use, in a bounded ledger that fails closed rather than evicting |
+
+`src/server/room-auth.ts` holds the policy; the Colyseus process owns no HIVE credential and makes
+no HIVE call. `onCreate` claims a room for one match without spending the creator's nonce, and
+`onAuth` then runs the full check for every seat including that one. A room is guest or
+authenticated for its whole life: a guest cannot enter a claimed room, and a capability cannot
+create a guest one. The HIVE identity stays server-side — published player ids are still Colyseus
+session ids.
+
+One seat per identity is claimed in `onAuth`, in the same synchronous step that approves it, rather
+than in `onJoin` where the seat actually appears. Colyseus awaits the first callback before calling
+the second, so a check written against seated players only would be a check two connections holding
+separately minted capabilities for one identity could both pass. Between the two callbacks the
+identity is *reserved*: held on a short deadline, promoted to a seat by `onJoin`, released by
+`onLeave` and `onDispose`. The deadline is what keeps a connection that dies in that gap — for which
+Colyseus never calls `onLeave` — from holding an identity out of its own match indefinitely.
+
+`HELLBREAK_GUEST_JOIN` defaults to `allow` so the live Render demo keeps working; a half-configured
+`ROOM_TOKEN_SECRET` stops the process rather than silently downgrading to open joins.
+
+Both hosts read that secret through one function (`readRoomTokenSecret`) and neither normalizes it:
+a value with leading or trailing whitespace is refused on both sides instead of being trimmed on
+one. Trimming would be the worst of the options available — the room server would report
+`authenticatedJoin: true` and then fail the signature of every capability the Next.js host minted,
+which reads as a broken token rather than as the environment mistake it is.
+
+Env ownership per host, the official contracts consulted, and the remaining credential blockers are
+in [`hive-matchmaking-rollout.md`](hive-matchmaking-rollout.md).
+
 ## MVP rollout
 
 The bot-playable local match and static GitHub Pages fallback do not require HIVE credentials. GitHub Pages cannot host the Colyseus WebSocket process, so online controls remain disabled unless a separate `NEXT_PUBLIC_GAME_SERVER_URL` is configured. HIVE integration remains deferred until the HIVE app ID, server API access, and custom web login configuration are available.

@@ -40,6 +40,17 @@ button.active-match { border-color: #9d6555; color: #a98579; }
 .mode-switch button.selected { border-color: #70f6ff; color: #c9fbff; background: rgba(24, 103, 118, .22); }
 .multiplayer-lobby { display: grid; gap: .75rem; width: 100%; margin: 1rem 0; }
 .multiplayer-lobby button { margin: 0; }
+.multiplayer-branches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+.multiplayer-branches .branch { display: grid; gap: .3rem; margin: 0; padding: .7rem; border: 1px solid #4d343d; background: rgba(21, 13, 21, .82); text-align: left; }
+.multiplayer-branches .branch strong { color: #f6eee7; font: 800 .68rem ui-monospace, monospace; letter-spacing: .06em; }
+.multiplayer-branches .branch small { color: #9a8892; font-size: .62rem; line-height: 1.45; letter-spacing: 0; }
+.multiplayer-branches .branch.selected { border-color: #70f6ff; background: rgba(17, 40, 47, .5); }
+.multiplayer-branches .branch.selected strong { color: #c9fbff; }
+/* A closed branch stays visible and readable: the reason next to it is the point. */
+.multiplayer-branches .branch:disabled { opacity: .55; cursor: not-allowed; }
+.branch-explanation { margin: 0; padding: .55rem .65rem; border-left: 2px solid #6d5560; color: #a9959e; font-size: .68rem; line-height: 1.55; }
+.room-mode { border: 1px solid rgba(120, 170, 178, .4); padding: .18rem .35rem; }
+.room-mode.authenticated { border-color: rgba(112, 246, 255, .55); color: #c9fbff !important; }
 .room-message, .room-error { margin: 0; color: #a9959e; font-size: .72rem; line-height: 1.5; }
 .room-error { color: #ff947a; }
 .room-summary { display: grid; grid-template-columns: auto 1fr auto; gap: .65rem; align-items: center; padding: .8rem; border: 1px solid rgba(112, 246, 255, .24); background: rgba(17, 40, 47, .35); }

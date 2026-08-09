@@ -1,20 +1,87 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { Client } from '@colyseus/sdk'
 import type { HellbreakRoomState } from '../src/server/hellbreak-state'
 import { HELLBREAK_ROOM_NAME } from '../src/shared/multiplayer-protocol'
 
 const SCENE_TIMEOUT_MS = 20_000
 const INPUT_OBSERVATION_MS = 8_000
-const LAVA_LABEL = /^용암 · (상승 중|폭발 임박|폭발 상승)$/
 /**
- * A rescue chip that is both holding a teammate and publishing a lava-proximity band, matched in
- * one selector. A live link lasts a fraction of a second, so reading the two attributes in separate
- * round trips would straddle its end and pair a state with an urgency from a different frame.
+ * How many times a browser jump may be re-pressed. A press is one edge, dropped without a trace if
+ * it lands while the 3D scene is starving the main thread, so the receipt — never a longer wait —
+ * decides whether the runner has actually been asked to jump yet.
  */
-const HOLDING_WITH_URGENCY = ['calm', 'urgent', 'critical']
-  .map((band) => `[data-testid="rescue-status"][data-state="holding"][data-urgency="${band}"]`)
-  .join(', ')
+const JUMP_PRESS_ATTEMPTS = 3
+const LAVA_LABEL = /^용암 · (상승 중|폭발 임박|폭발 상승)$/
+/** Lava proximity, said on the chip in words rather than left to the rope's colour. */
+const RESCUE_URGENCY_BANDS = ['calm', 'urgent', 'critical']
+/** The grip meter's own bands, so the readout is never a bare number. */
+const RESCUE_GRIP_BANDS = ['steady', 'warning', 'danger']
+
+/** One synchronous look at the page's whole rescue readout. */
+interface RescueReadoutProbe {
+  /** Latched the first time every part of the readout agreed inside a single committed frame. */
+  observed: boolean
+  /** The most recent frame, quoted verbatim when the latch never closed. */
+  last: string
+}
+
+function rescueReadoutProbe(page: Page): Promise<RescueReadoutProbe> {
+  return page.evaluate(() => (
+    (window as unknown as { __rescueReadout: RescueReadoutProbe }).__rescueReadout
+  ))
+}
+
+/**
+ * Latches the moment the page shows one whole rescue at once: the reciprocal ids on both runners,
+ * a single chip that is holding and publishing a lava band, and a banded grip meter — all read from
+ * the same synchronous DOM state.
+ *
+ * It has to run inside the page. A live link lasts well under a second while the scene keeps the
+ * main thread busy, so attributes fetched in separate round trips come from different instants and
+ * can report a pairing the page never rendered. The grip meter is also mounted only while it has
+ * something to say, and `locator.getAttribute` waits for an absent element instead of reporting it,
+ * so an over-the-wire probe can spend its entire budget inside one read taken before the link even
+ * existed. A MutationObserver cannot miss a frame the page committed: every attribute here is
+ * written by React, so the coherent state always arrives with a mutation.
+ */
+async function watchRescueReadout(
+  page: Page,
+  link: { rescuerId: string; targetId: string; urgencies: string[]; gripBands: string[] },
+) {
+  await page.evaluate(({ rescuerId, targetId, urgencies, gripBands }) => {
+    const probe = { observed: false, last: 'nothing sampled' }
+    ;(window as unknown as { __rescueReadout: typeof probe }).__rescueReadout = probe
+    const read = () => {
+      const chips = Array.from(document.querySelectorAll('[data-testid="rescue-status"]'))
+      const frame = {
+        grabTarget: document.querySelector('[data-testid="network-player"][data-own="true"]')
+          ?.getAttribute('data-grab-target') ?? '',
+        grabbedBy: document.querySelector(`[data-testid="network-player"][data-player-id="${targetId}"]`)
+          ?.getAttribute('data-grabbed-by') ?? '',
+        holdingWithUrgency: chips.filter((chip) => (
+          chip.getAttribute('data-state') === 'holding'
+          && urgencies.includes(chip.getAttribute('data-urgency') ?? '')
+        )).length,
+        gripBand: document.querySelector('[data-testid="rescue-grip"]')
+          ?.getAttribute('data-grip-band') ?? 'unmounted',
+      }
+      probe.last = JSON.stringify(frame)
+      if (
+        frame.grabTarget === targetId
+        && frame.grabbedBy === rescuerId
+        && frame.holdingWithUrgency === 1
+        && gripBands.includes(frame.gripBand)
+      ) probe.observed = true
+    }
+    read()
+    new MutationObserver(read).observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+    })
+  }, link)
+}
 
 test.describe.configure({ timeout: 90_000 })
 
@@ -33,6 +100,62 @@ function clockSeconds(label: string): number {
   const [minutes, seconds] = label.trim().split(':').map(Number)
   return minutes * 60 + seconds
 }
+
+/**
+ * Whether a published runner is standing at the height it took off from. Footing and height are one
+ * fact about one tick, so both are read from the same row in a single call rather than fetched one
+ * after the other, which can pair a height from mid-flight with a footing from after the landing.
+ */
+async function landedAt(runner: Locator, takeoffY: number, tolerance: number): Promise<boolean> {
+  const pose = await runner.evaluate((row) => ({
+    y: Number(row.getAttribute('data-y')),
+    grounded: row.getAttribute('data-grounded') === 'true',
+  }))
+  return pose.grounded && Math.abs(pose.y - takeoffY) < tolerance
+}
+
+test('the online lobby offers the guest demo and closes the HIVE queue with a reason', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+
+  await openOnlineTab(page)
+
+  const guest = page.getByTestId('multiplayer-mode-guest')
+  const hive = page.getByTestId('multiplayer-mode-hive')
+
+  await expect(guest).toBeEnabled()
+  await expect(guest).toHaveAttribute('data-available', 'true')
+  await expect(guest).toHaveAttribute('aria-pressed', 'true')
+
+  // The dev server is a real Next.js origin, so the honest blocker is the missing browser login
+  // rather than the static export. Either way the branch must never be offered as available.
+  await expect(hive).toBeDisabled()
+  await expect(hive).toHaveAttribute('data-available', 'false')
+  await expect(page.getByTestId('hive-unavailable')).toBeVisible()
+  await expect(page.getByTestId('hive-unavailable')).toHaveAttribute('data-blocker', 'login-unwired')
+  await expect(page.getByTestId('hive-queue-pending')).toHaveCount(0)
+
+  // Closing the authenticated branch must not close the demo it falls back to.
+  await page.getByRole('button', { name: '온라인 룸 만들기' }).click()
+  await expect(page.getByTestId('player-count')).toContainText('참가자 1/6')
+  await expect(page.getByTestId('room-mode')).toHaveAttribute('data-mode', 'guest')
+  expect(pageErrors).toEqual([])
+})
+
+test('the HIVE routes answer honestly on a server origin with no credentials', async ({ request }) => {
+  const capability = await request.get('/api/hive/session')
+  expect(capability.status()).toBe(200)
+  const report = await capability.json()
+  expect(report.configured).toBe(false)
+  expect(report.blockers).toContain('ROOM_TOKEN_SECRET')
+
+  // Every state-changing route refuses rather than pretending, and names no value.
+  for (const path of ['/api/hive/session', '/api/hive/matchmaking', '/api/hive/room-token']) {
+    const response = await request.post(path, { data: {} })
+    expect(response.status()).toBe(503)
+    expect(await response.json()).toMatchObject({ error: 'hive_not_configured' })
+  }
+})
 
 test('two browsers create, join, synchronize movement, and leave a room', async ({ browser }) => {
   const contextA = await browser.newContext()
@@ -149,22 +272,49 @@ test('one shared room drives server jump physics and the match HUD in both brows
     await pageA.bringToFront()
     await pageA.locator('canvas').click({ position: { x: 20, y: 20 } })
     // The local edge stays queued until sent; poll only the server-owned acknowledgement.
-    await pageA.keyboard.press('Space')
-    await expect.poll(async () => (
-      Number(await ownA.getAttribute('data-jump-ack'))
-    ), { timeout: INPUT_OBSERVATION_MS, intervals: [100] }).toBeGreaterThan(initialJumpAck)
-    const acknowledgedJump = Number(await ownA.getAttribute('data-jump-ack'))
+    //
+    // A press is a single edge: the page arms it on keydown and forwards it on its next send tick,
+    // so one that lands while the scene has the main thread never reaches the room at all. Press
+    // again only while the receipt has not moved and this runner is alive and standing — exactly
+    // the state the room owes a takeoff in — so a jump the room refuses still fails here, and a
+    // press is never repeated into a pose where refusing it would be correct.
+    const publishedJumpAck = async () => Number(await ownA.getAttribute('data-jump-ack'))
+    let acknowledgedJump = initialJumpAck
+    for (let press = 0; press < JUMP_PRESS_ATTEMPTS && acknowledgedJump === initialJumpAck; press += 1) {
+      await expect(ownA).toHaveAttribute('data-alive', 'true')
+      await expect(ownA).toHaveAttribute('data-grounded', 'true')
+      await pageA.keyboard.press('Space')
+      await expect.poll(publishedJumpAck, { timeout: INPUT_OBSERVATION_MS, intervals: [100] })
+        .toBeGreaterThan(initialJumpAck)
+        .catch(() => undefined)
+      acknowledgedJump = await publishedJumpAck()
+    }
+    expect(acknowledgedJump).toBeGreaterThan(initialJumpAck)
 
-    // The authoritative room, not the browser, applies gravity and the platform landing.
-    await expect(ownA).toHaveAttribute('data-grounded', 'true')
-    await expect.poll(async () => Math.abs(Number(await ownA.getAttribute('data-y')) - takeoffY)).toBeLessThan(0.1)
+    // The authoritative room, not the browser, applies gravity and the platform landing. Standing
+    // and the height are one fact, so they are read from one row in one go: fetched separately they
+    // can pair a mid-flight height with a footing from after the landing.
+    await expect.poll(() => landedAt(ownA, takeoffY, 0.1), {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [100],
+    }).toBe(true)
     await pageA.screenshot({ path: 'test-results/multiplayer-jump.png', fullPage: true })
 
-    // Browser B receives the same takeoff receipt and synchronized landing.
+    // Browser B receives the same takeoff receipt and synchronized landing. Both receipts are read
+    // together and only have to agree in the end, because a re-pressed jump can leave this browser
+    // one takeoff ahead of the other for as long as a patch takes to arrive.
     const mirroredJumper = pageB.locator(`[data-testid="network-player"][data-player-id="${jumperId}"]`)
-    await expect(mirroredJumper).toHaveAttribute('data-jump-ack', String(acknowledgedJump))
-    await expect(mirroredJumper).toHaveAttribute('data-grounded', 'true')
-    await expect.poll(async () => Math.abs(Number(await mirroredJumper.getAttribute('data-y')) - takeoffY)).toBeLessThan(0.1)
+    await expect.poll(async () => {
+      const [own, mirrored] = await Promise.all([
+        publishedJumpAck(),
+        mirroredJumper.getAttribute('data-jump-ack'),
+      ])
+      return { receipt: own > initialJumpAck, mirrored: mirrored === String(own) }
+    }, { timeout: INPUT_OBSERVATION_MS, intervals: [100] }).toEqual({ receipt: true, mirrored: true })
+    await expect.poll(() => landedAt(mirroredJumper, takeoffY, 0.1), {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [100],
+    }).toBe(true)
 
     // The other browser never requested a jump, so its acknowledgement and pose stay unchanged.
     await expect(ownB).toHaveAttribute('data-jump-ack', '0')
@@ -244,17 +394,21 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       intervals: [25],
     }).toBe(2)
     const rescueStartX = room.state.players.get(jumperId)?.x ?? -26
+    // Armed before the first hold, so no link can form unwatched.
+    await watchRescueReadout(page, {
+      rescuerId,
+      targetId: jumperId,
+      urgencies: RESCUE_URGENCY_BANDS,
+      gripBands: RESCUE_GRIP_BANDS,
+    })
     await page.keyboard.down('e')
     try {
       await page.waitForTimeout(250)
       const schemaLink = { target: jumperId, incoming: rescuerId }
       let schemaObserved = false
-      let domTargetObserved = false
-      let domIncomingObserved = false
       let readoutObserved = false
       let jumpSequence = 3
-      const allObserved = () => schemaObserved && domTargetObserved && domIncomingObserved
-        && readoutObserved
+      const allObserved = () => schemaObserved && readoutObserved
       for (let attempt = 0; attempt < 4 && !allObserved(); attempt += 1) {
         room.send('input', {
           sequence: jumpSequence,
@@ -282,35 +436,23 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
           grab: false,
           cameraYaw: 0,
         })
-        const checks: PromiseSettledResult<void>[] = await Promise.allSettled([
-          schemaObserved ? Promise.resolve() : expect.poll(() => ({
+        // The room's own copy of the link, read in this process, so watching it costs the busy
+        // browser nothing.
+        if (!schemaObserved) {
+          schemaObserved = await expect.poll(() => ({
             target: room.state.players.get(rescuerId)?.grabTargetId ?? '',
             incoming: room.state.players.get(jumperId)?.grabbedById ?? '',
-          }), { timeout: 1_200, intervals: [25] }).toEqual(schemaLink),
-          domTargetObserved ? Promise.resolve() : expect.poll(
-            () => rescuer.getAttribute('data-grab-target'),
-            { timeout: 1_200, intervals: [25] },
-          ).toBe(jumperId),
-          domIncomingObserved ? Promise.resolve() : expect.poll(
-            () => jumper.getAttribute('data-grabbed-by'),
-            { timeout: 1_200, intervals: [25] },
-          ).toBe(rescuerId),
-          // The player-facing readout has to say the same thing the schema does: holding a
-          // teammate, with lava proximity banded on the chip rather than left to the rope's
-          // colour, and a banded grip meter on screen rather than a bare number. Which grip band
-          // it lands in depends on how much grip earlier attempts burned, so any band counts.
-          readoutObserved ? Promise.resolve() : expect.poll(async () => ({
-            holdingWithUrgency: await page.locator(HOLDING_WITH_URGENCY).count(),
-            banded: ['steady', 'warning', 'danger'].includes(
-              (await page.getByTestId('rescue-grip').getAttribute('data-grip-band')) ?? '',
-            ),
-          }), { timeout: 1_200, intervals: [25] })
-            .toEqual({ holdingWithUrgency: 1, banded: true }),
-        ])
-        schemaObserved ||= checks[0].status === 'fulfilled'
-        domTargetObserved ||= checks[1].status === 'fulfilled'
-        domIncomingObserved ||= checks[2].status === 'fulfilled'
-        readoutObserved ||= checks[3].status === 'fulfilled'
+          }), { timeout: 1_200, intervals: [25] }).toEqual(schemaLink).then(() => true, () => false)
+        }
+        // The player-facing readout has to say the same thing the schema does: holding a teammate,
+        // with lava proximity banded on the chip rather than left to the rope's colour, and a
+        // banded grip meter on screen rather than a bare number. Which grip band it lands in
+        // depends on how much grip earlier attempts burned, so any band counts. The page latches
+        // that itself, so this only has to collect the latch — a link that came and went while the
+        // schema was being read is still counted, and the order of the two reads stops mattering.
+        if (!readoutObserved) {
+          readoutObserved = (await rescueReadoutProbe(page)).observed
+        }
         if (!allObserved()) {
           await expect.poll(() => room.state.players.get(jumperId)?.grounded ?? false, {
             timeout: INPUT_OBSERVATION_MS,
@@ -319,10 +461,12 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
           jumpSequence += 2
         }
       }
-      expect(schemaObserved).toBe(true)
-      expect(domTargetObserved).toBe(true)
-      expect(domIncomingObserved).toBe(true)
-      expect(readoutObserved).toBe(true)
+      // Read once more before judging: a link the schema already showed may have reached the page
+      // only after the last collection.
+      const readout = await rescueReadoutProbe(page)
+      readoutObserved ||= readout.observed
+      expect(schemaObserved, 'the room never published the rescue link').toBe(true)
+      expect(readoutObserved, `no coherent rescue readout; last frame ${readout.last}`).toBe(true)
       // Milestones, and only milestones, reach the live region: never a per-frame grip value.
       await expect(page.getByTestId('rescue-notice'))
         .toHaveText(/구조 시작|구조 성공|구조 실패|그립 소진/)

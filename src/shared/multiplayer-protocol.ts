@@ -3,6 +3,25 @@ export const ROOM_TICK_MS = 50
 export const MAX_ROOM_PLAYERS = 6
 
 /**
+ * How a room was entered. `guest` is the unauthenticated public demo; `authenticated` means every
+ * seat in the room was granted against a server-issued capability. A room is one or the other for
+ * its whole life and the room itself decides which, never a client.
+ */
+export type RoomJoinMode = 'guest' | 'authenticated'
+
+/**
+ * Everything a client may put in its join options.
+ *
+ * `roomToken` is opaque to the browser: it is minted by the Next.js server and only verified by the
+ * room. `assignedRoomId` is a routing hint for the matchmaker and carries no authority — the room
+ * requires it to match the token, so a wrong one is refused rather than honoured.
+ */
+export interface RoomJoinOptions {
+  roomToken?: string
+  assignedRoomId?: string
+}
+
+/**
  * Everything a client may send. Coordinates, velocity, grounded/alive/escaped
  * state, lava, and the match outcome are server-owned and never appear here.
  */

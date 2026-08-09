@@ -42,6 +42,11 @@ export class HellbreakRoomState extends Schema {
   elapsed = 0
   durationSeconds = 0
   serverTick = 0
+  /**
+   * `guest` or `authenticated`. Published so the lobby can say which kind of room a player is in
+   * without asking the client to remember how it joined. It carries no identity.
+   */
+  joinMode = 'guest'
   lavaHeight = 0
   lavaPhase = 'calm'
   matchPhase = 'running'
@@ -55,6 +60,7 @@ defineTypes(HellbreakRoomState, {
   elapsed: 'number',
   durationSeconds: 'number',
   serverTick: 'number',
+  joinMode: 'string',
   lavaHeight: 'number',
   lavaPhase: 'string',
   matchPhase: 'string',

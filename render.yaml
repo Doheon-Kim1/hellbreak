@@ -23,3 +23,7 @@ services:
       # Browser Origin allowlist for the GitHub Pages client. Not authentication.
       - key: HELLBREAK_ALLOWED_ORIGINS
         value: https://doheon-kim1.github.io
+      # This service is the public guest demo, so the policy is stated rather than defaulted.
+      # Production sets "deny" and shares ROOM_TOKEN_SECRET with the Next.js host instead.
+      - key: HELLBREAK_GUEST_JOIN
+        value: allow

@@ -29,6 +29,8 @@ import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { interpolateNetworkPosition } from '../network/interpolation'
 import { useHellbreakRoom } from '../network/use-hellbreak-room'
+import { useMultiplayerModes } from '../network/use-multiplayer-modes'
+import type { MultiplayerModeId } from '../shared/multiplayer-modes'
 import type {
   MultiplayerInputCommand,
   NetworkMatchSnapshot,
@@ -1120,6 +1122,10 @@ export default function HellbreakGame() {
   const abilityQueued = useRef(false)
   const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued }), [])
   const network = useHellbreakRoom()
+  // Which online branches this deployment may honestly offer. Guest stays available on the static
+  // Pages build; the HIVE branch stays closed until a server actually answers for it.
+  const multiplayerModes = useMultiplayerModes(network.status !== 'unavailable')
+  const [multiplayerMode, setMultiplayerMode] = useState<MultiplayerModeId>('guest')
   const onlineConnected = gameMode === 'online' && network.status === 'connected'
   const onlineHud = onlineHudModel(network.match, network.players, network.ownPlayerId)
   // What the previous patch showed, so an ended link can be told apart from a completed one and a
@@ -1301,12 +1307,17 @@ export default function HellbreakGame() {
         ) : (
           <>
             <p className="brief">
-              룸을 만들거나 공유받은 ID로 참가하세요. 좌표, 점프, 용암, 승패는 모두 서버가 계산합니다.
+              게스트 데모는 로그인 없이 룸을 만들거나 참가합니다. HIVE 인증 대기열은 서버가 배포된
+              정식 주소에서만 열립니다. 좌표, 점프, 용암, 승패는 어느 쪽이든 서버가 계산합니다.
             </p>
             {onlineConnected && <OnlineMatchHud hud={onlineHud} eliminations={network.match.eliminations} />}
             <MultiplayerLobby
               status={network.status}
               roomId={network.roomId}
+              roomMode={network.roomMode}
+              modes={multiplayerModes}
+              selectedMode={multiplayerMode}
+              onSelectMode={setMultiplayerMode}
               playerCount={network.players.length}
               error={network.error}
               finished={onlineHud.finished}

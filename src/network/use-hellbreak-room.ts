@@ -9,6 +9,7 @@ import type {
   MultiplayerInputCommand,
   NetworkMatchSnapshot,
   NetworkPlayerSnapshot,
+  RoomJoinMode,
 } from '../shared/multiplayer-protocol'
 
 export type RoomConnectionStatus = 'unavailable' | 'idle' | 'connecting' | 'connected' | 'error'
@@ -80,6 +81,7 @@ export function useHellbreakRoom() {
   const [ownPlayerId, setOwnPlayerId] = useState('')
   const [players, setPlayers] = useState<NetworkPlayerSnapshot[]>([])
   const [match, setMatch] = useState<NetworkMatchSnapshot>(IDLE_MATCH)
+  const [roomMode, setRoomMode] = useState<RoomJoinMode>('guest')
   const [error, setError] = useState<string | null>(null)
   const roomRef = useRef<ClientRoom | null>(null)
   const sequenceRef = useRef(0)
@@ -100,6 +102,7 @@ export function useHellbreakRoom() {
     setOwnPlayerId('')
     setPlayers([])
     setMatch(IDLE_MATCH)
+    setRoomMode('guest')
   }, [])
 
   const leave = useCallback(async () => {
@@ -168,6 +171,8 @@ export function useHellbreakRoom() {
       const sync = (state: HellbreakRoomState) => {
         setPlayers(snapshotPlayers(state))
         setMatch(snapshotMatch(state))
+        // The room decides its own join mode; the client only reads what it published.
+        setRoomMode(state.joinMode === 'authenticated' ? 'authenticated' : 'guest')
       }
       room.onStateChange(sync)
       sync(room.state)
@@ -211,6 +216,7 @@ export function useHellbreakRoom() {
     endpoint,
     status,
     roomId,
+    roomMode,
     ownPlayerId,
     players,
     match,

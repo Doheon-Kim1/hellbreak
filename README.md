@@ -79,10 +79,10 @@ HIVE 매치메이킹은 입장할 룸을 선택하거나 할당합니다. 프레
 
 ## 배포
 
-- GitHub Pages(정적 웹): https://doheon-kim1.github.io/hellbreak/
+- GitHub Pages(정적 웹, 게스트 데모 전용): https://doheon-kim1.github.io/hellbreak/
 - GitHub Pages 수동 배포: `npm run deploy:pages`
 - Render(실시간 룸 서버): [`render.yaml`](render.yaml) Blueprint
-- Vercel: 추후 연결 예정
+- Vercel(HIVE 인증 경로 전용): 자격 증명 확보 후 연결 예정
 
 GitHub Pages는 정적 웹 호스팅이므로 Colyseus 서버를 실행하지 않습니다. 서버 URL이 없는 Pages 빌드에서는 로컬 봇 경기는 계속 플레이할 수 있고 온라인 룸은 비활성 상태로 안내됩니다. 실시간 룸은 별도의 Node 프로세스로 Render에 배포합니다.
 
@@ -106,6 +106,29 @@ NEXT_PUBLIC_GAME_SERVER_URL=https://<render-service> npm run deploy:pages
 
 `<render-service>`를 Render가 할당한 실제 호스트로 바꿉니다. 브라우저 SDK가 매치메이킹 HTTP 요청과 WebSocket 프로토콜을 이 주소에서 자동으로 선택하므로 `https://` 형태를 그대로 사용합니다. 이 값은 빌드 타임에 정적 산출물로 구워지므로 서버 주소가 바뀌면 Pages를 다시 빌드해야 합니다.
 
+### 온라인 모드 분리: 게스트 데모와 HIVE 인증 대기열
+
+온라인 탭에는 두 갈래가 항상 함께 보이며, 서로 얽히지 않습니다.
+
+- **게스트 빠른 플레이:** 지금 배포된 경로입니다. 로그인 없이 룸을 만들거나 룸 ID로 참가합니다.
+  정적 GitHub Pages 빌드에서도 그대로 동작합니다.
+- **HIVE 인증 대기열:** 빌드·브라우저 로그인·서버가 모두 준비됐을 때만 열립니다. 그 전에는 버튼이
+  비활성 상태로 남고 **이유가 그대로 표시됩니다.** 환경 변수 이름은 노출하지 않습니다.
+
+닫히는 이유는 근본적인 순서대로 판정합니다: 정적 빌드 → 브라우저 로그인 미포함 → 서버 확인 중 →
+서버 설정 없음. 그래서 화면에 뜨는 문장은 "가장 먼저 바뀌어야 하는 것"과 항상 일치합니다.
+
+HIVE 서버 라우트(`src/app/api/hive/*`)는 모두 `route.ts`이고, Pages 빌드는 `.tsx`만 페이지로
+인식하므로 정적 산출물에는 아예 포함되지 않습니다. 자격 증명이 없는 배포에서 이 라우트들은
+`503 hive_not_configured`와 **부족한 키 이름만** 돌려주며, 값은 절대 노출하지 않습니다.
+
+룸 서버는 `ROOM_TOKEN_SECRET`을 공유받으면 서명된 짧은 수명 입장 토큰(신원·룸·만료·1회용 nonce)을
+검증합니다. 이 값은 두 호스트가 **같은 규칙으로 읽고 어느 쪽도 다듬지 않습니다**. 앞뒤 공백이
+붙어 있으면 한쪽만 조용히 잘라내 서로 다른 키를 쓰는 대신, 양쪽 모두 설정 오류로 거부합니다.
+`HELLBREAK_GUEST_JOIN`은 기본값이 `allow`라서 현재 공개 데모가 그대로 유지되고,
+운영 전환 시 `deny`로 닫습니다. 호스트별 환경 변수 소유와 남은 자격 증명 블로커는
+[`docs/hive-matchmaking-rollout.md`](docs/hive-matchmaking-rollout.md)에 정리돼 있습니다.
+
 ### 게스트 데모 경계
 
 공개된 룸 서버는 **인증 없는 게스트 데모**입니다. 다음을 명확히 전제합니다.
@@ -117,6 +140,8 @@ NEXT_PUBLIC_GAME_SERVER_URL=https://<render-service> npm run deploy:pages
 - **Origin 검사는 인증이 아님:** `HELLBREAK_ALLOWED_ORIGINS`는 일반적인 브라우저 임베딩만 제한합니다. 브라우저가 아닌 클라이언트는 Origin 헤더를 위조할 수 있습니다.
 - **없는 것:** 리더보드, 결제, 랭킹 보존, 운영 SLA가 없습니다.
 
-실제 공개 런칭 전에는 HIVE의 짧은 수명 룸 토큰 검증, 룸 생성 레이트 리밋, 지속되는 신원, 운영 체계가 반드시 필요합니다.
+실제 공개 런칭 전에는 룸 생성 레이트 리밋, 지속되는 신원, 운영 체계가 여전히 필요합니다. 짧은 수명
+룸 토큰 검증은 구현돼 있지만, HIVE 자격 증명과 매치 결과 콜백 계약이 확보되기 전까지는 켤 수
+없습니다.
 
-아키텍처는 [`docs/architecture.md`](docs/architecture.md), 놀이터 참고 자료는 [`docs/playground-reference.md`](docs/playground-reference.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.
+아키텍처는 [`docs/architecture.md`](docs/architecture.md), 놀이터 참고 자료는 [`docs/playground-reference.md`](docs/playground-reference.md), HIVE 롤아웃은 [`docs/hive-matchmaking-rollout.md`](docs/hive-matchmaking-rollout.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.

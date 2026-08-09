@@ -4,12 +4,26 @@ import { Server } from '@colyseus/core'
 import { WebSocketTransport } from '@colyseus/ws-transport'
 import type { NextFunction, Request, Response } from 'express'
 import { HELLBREAK_ROOM_NAME } from '../shared/multiplayer-protocol'
-import { HellbreakRoom } from './hellbreak-room'
+import { HellbreakRoom, configureRoomAuth } from './hellbreak-room'
+import { createReplayGuard, readRoomAuthPolicy } from './room-auth'
+import type { RoomAuthPolicy } from './room-auth'
 
 export interface HellbreakServerOptions {
   port?: number
   hostname?: string
   allowedOrigins?: string[]
+  /** Overrides the environment-derived join policy. Tests use it; deployments do not. */
+  authPolicy?: RoomAuthPolicy
+  /**
+   * Whether Colyseus may install its process-level shutdown hooks.
+   *
+   * The deployed process wants them: Render sends SIGTERM and rooms should close cleanly. A test
+   * process that starts a server per case does not, because Colyseus adds an `uncaughtException`
+   * listener plus three signal listeners per `Server` and removes none of them on shutdown, so the
+   * eleventh server would trip Node's listener-leak warning. Opting out is the fix; the explicit
+   * `shutdown()` below still closes the transport, the rooms, and the driver.
+   */
+  processShutdownHooks?: boolean
 }
 
 const LOCAL_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173']
@@ -23,8 +37,12 @@ export async function createHellbreakServer(options: HellbreakServerOptions = {}
     .filter(Boolean)
   const allowedOrigins = new Set(options.allowedOrigins ?? configuredOrigins ?? LOCAL_ORIGINS)
   const originAllowed = (origin: string | undefined) => !origin || allowedOrigins.has(origin)
+  // Throws on a half-configured secret rather than silently falling back to open guest joins.
+  const authPolicy = options.authPolicy ?? readRoomAuthPolicy(process.env)
+  configureRoomAuth({ policy: authPolicy, guard: createReplayGuard(), now: () => Date.now() })
   const httpServer = createServer()
   const gameServer = new Server({
+    gracefullyShutdown: options.processShutdownHooks ?? true,
     transport: new WebSocketTransport({
       server: httpServer,
       verifyClient: (info, done) => {
@@ -52,11 +70,19 @@ export async function createHellbreakServer(options: HellbreakServerOptions = {}
         next()
       })
       app.get('/health', (_request: Request, response: Response) => {
-        response.json({ ok: true, room: HELLBREAK_ROOM_NAME })
+        // Which join modes this deployment accepts, by name only: never the secret itself.
+        response.json({
+          ok: true,
+          room: HELLBREAK_ROOM_NAME,
+          guestJoin: authPolicy.guestJoin,
+          authenticatedJoin: authPolicy.roomTokenSecret !== null,
+        })
       })
     },
   })
-  gameServer.define(HELLBREAK_ROOM_NAME, HellbreakRoom)
+  // Authenticated players reach each other by the match key their capability names; the room
+  // re-checks the token, so this filter is routing and never authority.
+  gameServer.define(HELLBREAK_ROOM_NAME, HellbreakRoom).filterBy(['assignedRoomId'])
   await gameServer.listen(port, hostname)
 
   let closed = false
