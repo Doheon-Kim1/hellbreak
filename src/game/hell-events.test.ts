@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { abilitySpec, hellEventAt, pickupAbility, wardenLavaBonusAt } from './hell-events'
+import { abilitySpec, authoritativeHellEvent, hellEventAt, pickupAbility, wardenLavaBonusAt } from './hell-events'
 
 describe('warden playground events', () => {
   it('cycles through readable warnings, active danger, and cooldown', () => {
@@ -24,6 +24,28 @@ describe('warden playground events', () => {
     expect(wardenLavaBonusAt(144)).toBeCloseTo(0.75)
     expect(wardenLavaBonusAt(148)).toBeCloseTo(1.125)
     expect(wardenLavaBonusAt(152)).toBeCloseTo(1.5)
+  })
+})
+
+describe('authoritative online playground event', () => {
+  it('never reaches a state that removes or moves rendered playground geometry', () => {
+    const event = authoritativeHellEvent()
+    // GiantPlayground spawns moving hazards and drops route platforms 8-10 only while
+    // `phase === 'active'`, and the bridge drop additionally requires the collapse kind.
+    expect(event.phase).not.toBe('active')
+    expect(event.kind).not.toBe('bridge-collapse')
+  })
+
+  it('stays inert for every match time so the client matches fixed server collision', () => {
+    for (let elapsed = 0; elapsed <= 180; elapsed += 0.5) {
+      expect(authoritativeHellEvent()).toEqual(authoritativeHellEvent())
+      expect(authoritativeHellEvent().phase).not.toBe('active')
+    }
+  })
+
+  it('leaves the local bot match on the timed events that drive dynamic hazards', () => {
+    expect(hellEventAt(24)).toMatchObject({ kind: 'bridge-collapse', phase: 'active' })
+    expect(hellEventAt(6)).toMatchObject({ kind: 'swing-frenzy', phase: 'active' })
   })
 })
 

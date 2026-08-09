@@ -2,6 +2,10 @@ export const HELLBREAK_ROOM_NAME = 'hellbreak'
 export const ROOM_TICK_MS = 50
 export const MAX_ROOM_PLAYERS = 6
 
+/**
+ * Everything a client may send. Coordinates, velocity, grounded/alive/escaped
+ * state, lava, and the match outcome are server-owned and never appear here.
+ */
 export interface MultiplayerInputCommand {
   sequence: number
   forward: boolean
@@ -9,6 +13,7 @@ export interface MultiplayerInputCommand {
   left: boolean
   right: boolean
   sprint: boolean
+  jump: boolean
   cameraYaw: number
 }
 
@@ -17,5 +22,21 @@ export interface NetworkPlayerSnapshot {
   x: number
   y: number
   z: number
+  velocityY: number
+  grounded: boolean
+  alive: boolean
+  escaped: boolean
   lastProcessedInput: number
+  /** Sequence of the last jump the server applied as a grounded takeoff; 0 before any takeoff. */
+  lastAcknowledgedJump: number
+}
+
+export interface NetworkMatchSnapshot {
+  elapsed: number
+  durationSeconds: number
+  lavaHeight: number
+  lavaPhase: string
+  phase: string
+  winner: string
+  eliminations: number
 }

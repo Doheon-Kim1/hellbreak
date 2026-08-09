@@ -35,11 +35,13 @@
 The transport-independent room simulation now lives in `src/server/room-simulation.ts`.
 It already enforces the core Room Host boundary:
 
-- clients submit directional input plus a monotonically increasing sequence number;
+- clients submit directional and jump intent plus a monotonically increasing sequence number;
 - the room derives player ownership from the authenticated connection session instead of accepting a client-supplied player ID;
 - clients cannot submit authoritative coordinates;
 - stale, replayed, malformed, or non-boolean input is rejected;
-- diagonal movement and sprint speed are recalculated by the server;
+- diagonal movement, sprint speed, jump edges, gravity, grounding, route-platform collision, and world bounds are recalculated by the server;
+- rising lava, elimination, escape, room phase, and the winner are derived exclusively from server time and authoritative positions;
+- on the deadline tick an escape completed that tick wins for the runners, otherwise a non-empty room is a warden win—only an empty room stays in `final-escape` without a winner;
 - server ticks are capped at 100 ms to prevent pause-induced teleportation;
 - each room is limited to six authenticated players and disconnects remove input ownership immediately;
 - room state advances only through the server tick function.
@@ -50,17 +52,18 @@ It already enforces the core Room Host boundary:
 
 - `HellbreakRoomState` and `PlayerSchema` broadcast the authoritative player map;
 - room creation and `joinById` use server-issued room and session IDs;
-- input messages contain directional booleans, sprint, camera yaw, and a monotonic sequence number—never client coordinates;
-- a 20 Hz server tick advances the simulation and publishes `x/y/z` plus the last processed input sequence;
+- input messages contain directional booleans, sprint, jump, camera yaw, and a monotonic sequence number—never client coordinates or physics state;
+- a 20 Hz server tick advances horizontal and vertical movement against bounds derived from `PLAYGROUND_ROUTE`;
+- `HellbreakRoomState` publishes authoritative lava height/phase, match phase/winner, and per-player grounded/alive/escaped state with `x/y/z` and the last processed input sequence;
 - clients receive join, movement, and disconnect patches through `@colyseus/sdk`;
 - the browser interpolates rendered avatars toward the latest server position.
 
-`src/server/colyseus-server.ts` runs the WebSocket process separately from Next.js on port 2567 and provides `/health`. Development uses `npm run dev` to start both processes. Browser E2E coverage creates two isolated contexts, joins them to one room, moves one participant, observes the movement from the other, and verifies disconnect cleanup.
+`src/server/colyseus-server.ts` runs the WebSocket process separately from Next.js on port 2567 and provides `/health`. Development uses `npm run dev` to start both processes. Browser E2E coverage creates two isolated contexts, joins them to one room, observes shared movement, authoritative jump/landing and match HUD state, and verifies disconnect cleanup.
 
-The current network slice deliberately synchronizes only horizontal `x/z` movement. The server keeps `y` at its assigned spawn height until server-side Rapier collision and vertical movement are introduced. This prevents the browser from becoming authoritative over jump or climb coordinates.
+The current network slice uses deterministic server-side kinematic collision for the fixed climb route rather than running Rapier in the room process. This keeps the competitive rules pure and testable while the client retains Rapier for the credential-free local bot match. Moving platforms, grab/pull constraints, items, combat, and full server-side hazard physics remain future slices.
 
 The adapter keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
 
 ## MVP rollout
 
-The bot-playable local match does not require HIVE credentials. HIVE integration starts when the HIVE app ID, server API access, and custom web login configuration are available.
+The bot-playable local match and static GitHub Pages fallback do not require HIVE credentials. GitHub Pages cannot host the Colyseus WebSocket process, so online controls remain disabled unless a separate `NEXT_PUBLIC_GAME_SERVER_URL` is configured. HIVE integration and public room hosting start when the HIVE app ID, server API access, custom web login configuration, and a protected dedicated server environment are available.

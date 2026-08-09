@@ -5,7 +5,11 @@ import type { Room } from '@colyseus/sdk'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { HellbreakRoomState } from '../server/hellbreak-state'
 import { HELLBREAK_ROOM_NAME } from '../shared/multiplayer-protocol'
-import type { MultiplayerInputCommand, NetworkPlayerSnapshot } from '../shared/multiplayer-protocol'
+import type {
+  MultiplayerInputCommand,
+  NetworkMatchSnapshot,
+  NetworkPlayerSnapshot,
+} from '../shared/multiplayer-protocol'
 
 export type RoomConnectionStatus = 'unavailable' | 'idle' | 'connecting' | 'connected' | 'error'
 
@@ -20,6 +24,16 @@ function configuredEndpoint(): string | null {
   return `${protocol}//${window.location.hostname}:2567`
 }
 
+const IDLE_MATCH: NetworkMatchSnapshot = {
+  elapsed: 0,
+  durationSeconds: 180,
+  lavaHeight: -4,
+  lavaPhase: 'calm',
+  phase: 'running',
+  winner: '',
+  eliminations: 0,
+}
+
 function snapshotPlayers(state: HellbreakRoomState | undefined): NetworkPlayerSnapshot[] {
   const players: NetworkPlayerSnapshot[] = []
   if (!state?.players) return players
@@ -29,10 +43,28 @@ function snapshotPlayers(state: HellbreakRoomState | undefined): NetworkPlayerSn
       x: player.x,
       y: player.y,
       z: player.z,
+      velocityY: player.velocityY,
+      grounded: player.grounded,
+      alive: player.alive,
+      escaped: player.escaped,
       lastProcessedInput: player.lastProcessedInput,
+      lastAcknowledgedJump: player.lastAcknowledgedJump,
     })
   })
   return players.sort((left, right) => left.id.localeCompare(right.id))
+}
+
+function snapshotMatch(state: HellbreakRoomState | undefined): NetworkMatchSnapshot {
+  if (!state) return IDLE_MATCH
+  return {
+    elapsed: state.elapsed,
+    durationSeconds: state.durationSeconds || IDLE_MATCH.durationSeconds,
+    lavaHeight: state.lavaHeight,
+    lavaPhase: state.lavaPhase,
+    phase: state.matchPhase,
+    winner: state.winner,
+    eliminations: state.eliminations,
+  }
 }
 
 export function useHellbreakRoom() {
@@ -41,6 +73,7 @@ export function useHellbreakRoom() {
   const [roomId, setRoomId] = useState('')
   const [ownPlayerId, setOwnPlayerId] = useState('')
   const [players, setPlayers] = useState<NetworkPlayerSnapshot[]>([])
+  const [match, setMatch] = useState<NetworkMatchSnapshot>(IDLE_MATCH)
   const [error, setError] = useState<string | null>(null)
   const roomRef = useRef<ClientRoom | null>(null)
   const sequenceRef = useRef(0)
@@ -60,6 +93,7 @@ export function useHellbreakRoom() {
     setRoomId('')
     setOwnPlayerId('')
     setPlayers([])
+    setMatch(IDLE_MATCH)
   }, [])
 
   const leave = useCallback(async () => {
@@ -125,7 +159,10 @@ export function useHellbreakRoom() {
       roomRef.current = room
       setRoomId(room.roomId)
       setOwnPlayerId(room.sessionId)
-      const sync = (state: HellbreakRoomState) => setPlayers(snapshotPlayers(state))
+      const sync = (state: HellbreakRoomState) => {
+        setPlayers(snapshotPlayers(state))
+        setMatch(snapshotMatch(state))
+      }
       room.onStateChange(sync)
       sync(room.state)
       room.onLeave(() => {
@@ -158,6 +195,11 @@ export function useHellbreakRoom() {
     sequenceRef.current += 1
     room.send('input', { ...input, sequence: sequenceRef.current } satisfies MultiplayerInputCommand)
   }, [status])
+  const requestRestart = useCallback(() => {
+    const room = roomRef.current
+    if (!room || status !== 'connected') return
+    room.send('restart')
+  }, [status])
 
   return {
     endpoint,
@@ -165,10 +207,12 @@ export function useHellbreakRoom() {
     roomId,
     ownPlayerId,
     players,
+    match,
     error,
     createRoom,
     joinRoom,
     leave,
     sendInput,
+    requestRestart,
   }
 }

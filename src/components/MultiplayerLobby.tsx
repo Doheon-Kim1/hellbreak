@@ -8,17 +8,21 @@ export function MultiplayerLobby({
   roomId,
   playerCount,
   error,
+  finished,
   onCreate,
   onJoin,
   onLeave,
+  onRestart,
 }: {
   status: RoomConnectionStatus
   roomId: string
   playerCount: number
   error: string | null
+  finished: boolean
   onCreate: () => void
   onJoin: (roomId: string) => void
   onLeave: () => void
+  onRestart: () => void
 }) {
   const [joinId, setJoinId] = useState('')
   const connected = status === 'connected'
@@ -34,9 +38,16 @@ export function MultiplayerLobby({
             <strong data-testid="room-id">{roomId}</strong>
             <small data-testid="player-count">참가자 {playerCount}/6</small>
           </div>
-          <button type="button" className="secondary-action" onClick={() => void onLeave()}>
-            룸 나가기
-          </button>
+          <div className="room-actions">
+            {finished && (
+              <button type="button" data-testid="room-restart" onClick={onRestart}>
+                다시 경기
+              </button>
+            )}
+            <button type="button" className="secondary-action" onClick={() => void onLeave()}>
+              룸 나가기
+            </button>
+          </div>
         </>
       ) : (
         <>

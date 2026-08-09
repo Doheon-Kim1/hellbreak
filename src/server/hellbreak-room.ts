@@ -10,6 +10,8 @@ import {
   createRoomState,
   joinRoom,
   leaveRoom,
+  publicRoomSnapshot,
+  restartRoom,
   stepRoom,
 } from './room-simulation'
 import type { AuthoritativeRoomState } from './room-simulation'
@@ -26,6 +28,16 @@ export class HellbreakRoom extends Room<{ state: HellbreakRoomState }> {
 
     this.onMessage<MultiplayerInputCommand>('input', (client, input) => {
       this.simulation = applyPlayerInput(this.simulation, client.sessionId, input)
+      this.syncPublicState()
+    })
+
+    // Restart carries no payload: only a seated session may reset an already finished match.
+    this.onMessage('restart', (client) => {
+      if (
+        !Object.hasOwn(this.simulation.sessions, client.sessionId)
+        || this.simulation.phase !== 'finished'
+      ) return
+      this.simulation = restartRoom(this.simulation)
       this.syncPublicState()
     })
 
@@ -47,13 +59,20 @@ export class HellbreakRoom extends Room<{ state: HellbreakRoomState }> {
   }
 
   private syncPublicState(): void {
-    this.state.elapsed = this.simulation.elapsed
+    const snapshot = publicRoomSnapshot(this.simulation)
+    this.state.elapsed = snapshot.elapsed
+    this.state.durationSeconds = snapshot.durationSeconds
+    this.state.lavaHeight = snapshot.lavaHeight
+    this.state.lavaPhase = snapshot.lavaPhase
+    this.state.matchPhase = snapshot.phase
+    this.state.winner = snapshot.winner ?? ''
+    this.state.eliminations = snapshot.eliminations
 
     for (const playerId of this.state.players.keys()) {
-      if (!Object.hasOwn(this.simulation.players, playerId)) this.state.players.delete(playerId)
+      if (!Object.hasOwn(snapshot.players, playerId)) this.state.players.delete(playerId)
     }
 
-    for (const [playerId, player] of Object.entries(this.simulation.players)) {
+    for (const [playerId, player] of Object.entries(snapshot.players)) {
       let publicPlayer = this.state.players.get(playerId)
       if (!publicPlayer) {
         publicPlayer = new PlayerSchema()
@@ -63,7 +82,12 @@ export class HellbreakRoom extends Room<{ state: HellbreakRoomState }> {
       publicPlayer.x = player.x
       publicPlayer.y = player.y
       publicPlayer.z = player.z
-      publicPlayer.lastProcessedInput = player.lastSequence
+      publicPlayer.velocityY = player.velocityY
+      publicPlayer.grounded = player.grounded
+      publicPlayer.alive = player.alive
+      publicPlayer.escaped = player.escaped
+      publicPlayer.lastProcessedInput = player.lastProcessedInput
+      publicPlayer.lastAcknowledgedJump = player.lastAcknowledgedJump
     }
   }
 }

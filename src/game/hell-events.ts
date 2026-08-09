@@ -83,6 +83,23 @@ export function hellEventAt(elapsedSeconds: number): HellEventState {
   }
 }
 
+/**
+ * Inert event for server-authoritative online play. `room-simulation` collides against
+ * the fixed PLAYGROUND_ROUTE surfaces and never reacts to hell events, so the online
+ * client must not remove or move anything the server keeps solid. `GiantPlayground`
+ * gates every geometry change on `phase === 'active'` (and the route 8-10 bridge drop
+ * additionally on the collapse kind), so this cooldown `lava-boost` state renders the
+ * full authoritative route with no moving hazards. Local bot matches keep `hellEventAt`.
+ */
+export function authoritativeHellEvent(): HellEventState {
+  return {
+    kind: 'lava-boost',
+    phase: 'cooldown',
+    secondsRemaining: 0,
+    label: EVENT_LABELS['lava-boost'],
+  }
+}
+
 export function wardenLavaBonusAt(elapsedSeconds: number): number {
   const elapsed = Math.max(0, Number.isFinite(elapsedSeconds) ? elapsedSeconds : 0)
   const firstBoostStart = 64

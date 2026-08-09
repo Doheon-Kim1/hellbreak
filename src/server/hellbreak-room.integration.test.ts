@@ -92,4 +92,86 @@ describe('Colyseus HELLBREAK room', () => {
     await waitFor(() => roomA.state.players.size === 1)
     expect(roomA.state.players.has(roomB.sessionId)).toBe(false)
   })
+
+  it('broadcasts authoritative jump, lava, and match state and ignores client coordinates', async () => {
+    const running = await createHellbreakServer({ port: 0, hostname: '127.0.0.1' })
+    shutdown = running.shutdown
+    const address = running.httpServer.address() as { port: number }
+    const endpoint = `ws://127.0.0.1:${address.port}`
+
+    const roomA = await new Client(endpoint).create<HellbreakRoomState>('hellbreak')
+    rooms.push(roomA)
+    const roomB = await new Client(endpoint).joinById<HellbreakRoomState>(roomA.roomId)
+    rooms.push(roomB)
+    await waitFor(() => roomA.state.players.size === 2 && roomB.state.players.size === 2)
+
+    // The observer's view of the mover is the authoritative one under test.
+    const mover = () => roomB.state.players.get(roomA.sessionId)!
+    const groundY = mover().y
+    expect(mover().grounded).toBe(true)
+    expect(mover().alive).toBe(true)
+    expect(mover().escaped).toBe(false)
+    expect(mover().lastAcknowledgedJump).toBe(0)
+
+    roomA.send('input', {
+      sequence: 1,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: true,
+      cameraYaw: 0,
+    })
+
+    await waitFor(() => mover().y > groundY + 0.25 && mover().velocityY > 0 && !mover().grounded)
+    // Both clients receive the same server-owned acknowledgement of the applied impulse.
+    await waitFor(() => mover().lastAcknowledgedJump === 1)
+    expect(roomA.state.players.get(roomA.sessionId)!.lastAcknowledgedJump).toBe(1)
+    await waitFor(() => mover().grounded && Math.abs(mover().y - groundY) < 0.05)
+    expect(mover().lastAcknowledgedJump).toBe(1)
+
+    await waitFor(() => roomA.state.elapsed > 0.3)
+    expect(roomA.state.durationSeconds).toBe(180)
+    expect(roomA.state.matchPhase).toBe('running')
+    expect(roomA.state.winner).toBe('')
+    expect(roomA.state.lavaHeight).toBeGreaterThan(-4)
+    expect(['calm', 'warning', 'surge']).toContain(roomA.state.lavaPhase)
+    expect(roomB.state.lavaHeight).toBeCloseTo(roomA.state.lavaHeight, 3)
+
+    // A client may only submit intent: smuggled coordinates must never move an avatar.
+    const before = { x: mover().x, y: mover().y, z: mover().z }
+    roomA.send('input', {
+      sequence: 2,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      cameraYaw: 0,
+      x: 999,
+      y: 999,
+      z: 999,
+      velocityY: 999,
+      grounded: false,
+      alive: false,
+      escaped: true,
+      lastAcknowledgedJump: 999,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    expect(mover().x).toBeCloseTo(before.x, 3)
+    expect(mover().z).toBeCloseTo(before.z, 3)
+    expect(mover().y).toBeCloseTo(before.y, 3)
+    expect(mover().alive).toBe(true)
+    expect(mover().escaped).toBe(false)
+    expect(mover().lastAcknowledgedJump).toBe(1)
+
+    // Restart is a finished-match affordance only; a running match must ignore it.
+    roomA.send('restart')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(roomA.state.matchPhase).toBe('running')
+    expect(roomA.state.elapsed).toBeGreaterThan(0.3)
+  })
 })
