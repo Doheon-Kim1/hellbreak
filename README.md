@@ -72,11 +72,44 @@ HIVE 매치메이킹은 입장할 룸을 선택하거나 할당합니다. 프레
 
 ## 배포
 
-- GitHub Pages: https://doheon-kim1.github.io/hellbreak/
+- GitHub Pages(정적 웹): https://doheon-kim1.github.io/hellbreak/
 - GitHub Pages 수동 배포: `npm run deploy:pages`
+- Render(실시간 룸 서버): [`render.yaml`](render.yaml) Blueprint
 - Vercel: 추후 연결 예정
 
-GitHub Pages는 정적 웹 호스팅이므로 Colyseus 서버를 실행하지 않습니다. 서버 URL이 없는 Pages 빌드에서는 로컬 봇 경기는 계속 플레이할 수 있고 온라인 룸은 비활성 상태로 안내됩니다.
-현재 룸은 인증 없는 로컬 게스트 검증용입니다. HIVE의 짧은 수명 룸 토큰과 생성 제한을 연결하기 전에는 Colyseus 프로세스를 공개 인터넷에 배포하지 않습니다.
+GitHub Pages는 정적 웹 호스팅이므로 Colyseus 서버를 실행하지 않습니다. 서버 URL이 없는 Pages 빌드에서는 로컬 봇 경기는 계속 플레이할 수 있고 온라인 룸은 비활성 상태로 안내됩니다. 실시간 룸은 별도의 Node 프로세스로 Render에 배포합니다.
+
+### Render 룸 서버 배포
+
+1. 원클릭 배포 링크를 엽니다: https://render.com/deploy?repo=https://github.com/Doheon-Kim1/hellbreak
+2. 이 저장소는 비공개이므로 저장소 소유자가 [Render GitHub App](https://github.com/apps/render)을 설치하고 `Doheon-Kim1/hellbreak` 접근을 허용해야 Blueprint를 적용할 수 있습니다.
+3. Blueprint가 `render.yaml`의 설정으로 `hellbreak-room` 웹 서비스를 생성합니다. 리전 `singapore`, 브랜치 `main`, 인스턴스 1개, 헬스체크 `/health`, 빌드 `npm ci --include=dev`, 시작 `npm run start:room`, PR 프리뷰 비활성입니다.
+4. `NODE_VERSION`은 lockfile 검증에 사용한 Node 22 릴리스로 고정되어 있고, `HELLBREAK_ALLOWED_ORIGINS`는 `https://doheon-kim1.github.io`로 설정됩니다. Blueprint에는 비밀 값이 들어 있지 않습니다.
+5. `https://<render-service>/health`가 HTTP 200과 룸 이름을 반환하면 배포된 것입니다. 할당된 HTTPS 주소를 기록해 두세요.
+
+`plan: free`로 선언되어 있지만 Render 계정 상태나 요금제 정책에 따라 무료 인스턴스가 보장되지는 않습니다. 실제 청구 조건은 배포 전에 Render 대시보드에서 확인하세요.
+
+Deploy-to-Render 버튼으로 생성된 여러 서비스가 원본 저장소 커밋마다 일괄 재배포되지 않도록 자동 배포는 꺼져 있습니다. 룸 서버 코드를 변경한 뒤에는 Render 대시보드에서 해당 서비스의 수동 배포를 실행하세요.
+
+### 배포 후 Pages 연결
+
+```bash
+NEXT_PUBLIC_GAME_SERVER_URL=https://<render-service> npm run deploy:pages
+```
+
+`<render-service>`를 Render가 할당한 실제 호스트로 바꿉니다. 브라우저 SDK가 매치메이킹 HTTP 요청과 WebSocket 프로토콜을 이 주소에서 자동으로 선택하므로 `https://` 형태를 그대로 사용합니다. 이 값은 빌드 타임에 정적 산출물로 구워지므로 서버 주소가 바뀌면 Pages를 다시 빌드해야 합니다.
+
+### 게스트 데모 경계
+
+공개된 룸 서버는 **인증 없는 게스트 데모**입니다. 다음을 명확히 전제합니다.
+
+- **신원 없음:** 로그인, 계정, 지속되는 플레이어 식별자가 없습니다.
+- **인메모리 룸:** 룸 상태는 프로세스 메모리에만 존재합니다. 데이터베이스도 저장소도 없습니다.
+- **재시작·콜드스타트 시 연결 끊김:** 배포, 재시작, 유휴 상태에서 깨어나는 인스턴스는 진행 중인 룸을 모두 파괴하고 접속자를 끊습니다. 첫 요청은 응답이 느릴 수 있습니다.
+- **단일 인스턴스:** 룸 상태를 인스턴스 간에 공유할 수 없으므로 수평 확장이 불가능합니다.
+- **Origin 검사는 인증이 아님:** `HELLBREAK_ALLOWED_ORIGINS`는 일반적인 브라우저 임베딩만 제한합니다. 브라우저가 아닌 클라이언트는 Origin 헤더를 위조할 수 있습니다.
+- **없는 것:** 리더보드, 결제, 랭킹 보존, 운영 SLA가 없습니다.
+
+실제 공개 런칭 전에는 HIVE의 짧은 수명 룸 토큰 검증, 룸 생성 레이트 리밋, 지속되는 신원, 운영 체계가 반드시 필요합니다.
 
 아키텍처는 [`docs/architecture.md`](docs/architecture.md), 놀이터 참고 자료는 [`docs/playground-reference.md`](docs/playground-reference.md), 저용량 작업 정책은 [`docs/low-disk-workflow.md`](docs/low-disk-workflow.md)를 참고하세요.

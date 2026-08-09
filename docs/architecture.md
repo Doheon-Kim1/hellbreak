@@ -66,4 +66,22 @@ The adapter keeps competitive rules independent from the networking framework an
 
 ## MVP rollout
 
-The bot-playable local match and static GitHub Pages fallback do not require HIVE credentials. GitHub Pages cannot host the Colyseus WebSocket process, so online controls remain disabled unless a separate `NEXT_PUBLIC_GAME_SERVER_URL` is configured. HIVE integration and public room hosting start when the HIVE app ID, server API access, custom web login configuration, and a protected dedicated server environment are available.
+The bot-playable local match and static GitHub Pages fallback do not require HIVE credentials. GitHub Pages cannot host the Colyseus WebSocket process, so online controls remain disabled unless a separate `NEXT_PUBLIC_GAME_SERVER_URL` is configured. HIVE integration remains deferred until the HIVE app ID, server API access, and custom web login configuration are available.
+
+## Deployment boundary
+
+The static Next.js export and the realtime room process are deployed separately:
+
+| Artifact | Host | Notes |
+| --- | --- | --- |
+| Next.js static export | GitHub Pages | `npm run deploy:pages`; `NEXT_PUBLIC_GAME_SERVER_URL` is baked in at build time |
+| `src/server/colyseus-server.ts` | Render web service `hellbreak-room` | Declared by `render.yaml`; Singapore, one instance, `/health` health check |
+
+The deployed room server is an **unauthenticated guest demo**, not a production service:
+
+- no identity, no persistence, no leaderboard, no payment, no operational SLA;
+- rooms live only in the process memory of a single instance and cannot be distributed;
+- a restart, redeploy, or cold start destroys every live room and disconnects its clients;
+- `HELLBREAK_ALLOWED_ORIGINS` restricts the browser Origin to the Pages site, which limits ordinary browser embedding but is **not** authentication—non-browser clients can spoof the Origin header.
+
+Short-lived HIVE room join tokens, room-creation rate limiting, durable identity, and production operations are required before a real public launch. The security rules above still apply: no provider credentials are committed, and `render.yaml` carries no secret values.

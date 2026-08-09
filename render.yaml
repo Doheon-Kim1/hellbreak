@@ -1,0 +1,25 @@
+# HELLBREAK authoritative Colyseus room server.
+# Unauthenticated guest demo: single instance, in-memory rooms, no persistence.
+previews:
+  # Quoted so YAML 1.1 parsers cannot coerce the string enum into a boolean.
+  generation: "off"
+services:
+  - type: web
+    name: hellbreak-room
+    runtime: node
+    region: singapore
+    branch: main
+    plan: free
+    numInstances: 1
+    healthCheckPath: /health
+    buildCommand: npm ci --include=dev
+    startCommand: npm run start:room
+    # Deploy-to-Render templates should not redeploy every instance on source pushes.
+    autoDeployTrigger: off
+    envVars:
+      # Pinned to the latest Node 22 release the lockfile is verified against.
+      - key: NODE_VERSION
+        value: "22.23.2"
+      # Browser Origin allowlist for the GitHub Pages client. Not authentication.
+      - key: HELLBREAK_ALLOWED_ORIGINS
+        value: https://doheon-kim1.github.io
