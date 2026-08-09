@@ -5,7 +5,7 @@ import { CapsuleCollider, CuboidCollider, Physics, RigidBody, useRapier } from '
 import type { IntersectionEnterPayload, IntersectionExitPayload, RapierCollider, RapierRigidBody } from '@react-three/rapier'
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
-import { Vector3 } from 'three'
+import { Matrix4, Quaternion, Vector3 } from 'three'
 import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
 import { DEFAULT_CAMERA_ORBIT, cameraOrbitOffset, rotateMovementByCamera, updateCameraOrbit } from '../game/camera'
 import type { CameraOrbit } from '../game/camera'
@@ -17,7 +17,14 @@ import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/moveme
 import { createMatch, stepMatch } from '../game/match'
 import { formatMatchClock, nextRescueHudMemory, onlineHudModel, rescueHudModel } from '../game/hud'
 import type { OnlineHudModel, RescueHudMemory, RescueHudModel, RescueLinkView } from '../game/hud'
-import { rescueRopeLength } from '../game/rescue-rope'
+import { rescueRopePresence } from '../game/rescue-rope'
+import { RESCUE_ROPE_SEGMENTS, createRescueRopeResources } from '../game/rescue-rope-material'
+import {
+  approachRescueValue,
+  createRescueRopeVisual,
+  rescueRopeSagOffset,
+  rescueRopeVisual,
+} from '../game/rescue-rope-visuals'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { interpolateNetworkPosition } from '../network/interpolation'
@@ -41,6 +48,19 @@ const ABILITY_PICKUPS: readonly { ability: RunnerAbility; position: readonly [nu
   { ability: 'extinguisher', position: [-5, 6.05, -12] },
 ]
 const KEY_ART_URL = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/assets/hellbreak-key-art.webp`
+
+const TAU = Math.PI * 2
+/** Axis a unit cylinder is built along, and the one a torus is built around. */
+const ROPE_UP = new Vector3(0, 1, 0)
+const ROPE_AXIS = new Vector3(0, 0, 1)
+/** Seconds a newly published link grows in over, so a rope never pops onto a broadcast frame. */
+const ROPE_APPEAR_SECONDS = 0.12
+/** Metres along the rope the endpoint markers sit at, clear of the 0.3 m avatar capsule. */
+const ROPE_ANCHOR_INSET = 0.34
+/** Standing waves shaken into a fraying rope. */
+const ROPE_TREMOR_WAVES = 5.5
+/** The rescued end wears a ring wide enough to read as a clip rather than as a second knot. */
+const ROPE_RING_SCALE = 2.2
 
 type RunnerControls = {
   input: RefObject<RunnerControlSources>
@@ -92,6 +112,24 @@ function useRunnerControls(controls: RunnerControls) {
       window.removeEventListener('blur', clear)
     }
   }, [controls])
+}
+
+/**
+ * Whether the viewer asked their system for reduced motion. The rope answers by holding its pulse
+ * and tremor still; urgency still reaches them through width, tension, fray, colour, and the chip.
+ */
+function useReducedMotion() {
+  const [reduced, setReduced] = useState(false)
+
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const sync = () => setReduced(query.matches)
+    sync()
+    query.addEventListener('change', sync)
+    return () => query.removeEventListener('change', sync)
+  }, [])
+
+  return reduced
 }
 
 function GameCamera({
@@ -429,50 +467,121 @@ function NetworkAvatar({
 }
 
 /**
- * Bright rope between two linked avatars. It follows the interpolated render positions so it stays
- * attached between authoritative patches, and turns hot during the lava panic band.
+ * The in-scene Lava Lifeline: a sagging, pulsing rope between two linked avatars, with a knot on
+ * the rescuer and a ring on the runner being hauled up.
+ *
+ * Every value it draws comes from the published snapshot. The client cannot change the target, the
+ * pull, the grip, or the cooldown by rendering differently — the room re-decides all of it every
+ * tick, and this component only reads.
+ *
+ * Nothing is rebuilt per frame. The geometry, material, and instance buffer are created once and
+ * only their transforms, colour, and opacity move, because regenerating a tube 60 times a second is
+ * exactly the mobile regression this rope has to avoid. Published grip and lava height are eased
+ * rather than applied raw, so a 20 Hz patch stream cannot make the rope step or strobe.
  */
 function RescueRope({
   link,
   positions,
+  reducedMotion,
 }: {
   link: RescueLinkView
   positions: RefObject<Map<string, Vector3>>
+  reducedMotion: boolean
 }) {
-  const rope = useRef<Mesh>(null)
-  const direction = useMemo(() => new Vector3(), [])
-  const up = useMemo(() => new Vector3(0, 1, 0), [])
+  const resources = useMemo(() => createRescueRopeResources(), [])
+  // One scratch set for the life of the rope: a frame writes into these and allocates nothing.
+  const scratch = useMemo(() => ({
+    presence: { visible: false, length: 0 },
+    input: { length: 0, heightAboveLava: 0, grip: 1, pulsePhase: 0, reducedMotion: false },
+    visual: createRescueRopeVisual(),
+    direction: new Vector3(),
+    lateral: new Vector3(),
+    segment: new Vector3(),
+    mid: new Vector3(),
+    scale: new Vector3(),
+    rotation: new Quaternion(),
+    matrix: new Matrix4(),
+    points: Array.from({ length: RESCUE_ROPE_SEGMENTS + 1 }, () => new Vector3()),
+  }), [])
+  const eased = useRef({ grip: link.grip, height: link.heightAboveLava, phase: 0, appear: 0 })
 
-  useFrame(() => {
-    const mesh = rope.current
-    if (!mesh) return
+  useEffect(() => () => resources.dispose(), [resources])
+
+  useFrame((_, delta) => {
     const from = positions.current?.get(link.rescuerId)
     const to = positions.current?.get(link.targetId)
     // A missing, degenerate, or non-finite pair hides the rope instead of poisoning its transform.
-    const length = rescueRopeLength(from, to)
-    mesh.visible = length > 0
-    if (!mesh.visible || !from || !to) return
+    const presence = rescueRopePresence(link, from, to, scratch.presence)
+    resources.group.visible = presence.visible
+    const smoothed = eased.current
+    if (!presence.visible || !from || !to) {
+      // A link that comes back gets its grow-in again rather than snapping to full width.
+      smoothed.appear = 0
+      return
+    }
 
-    // A unit cylinder stretched between the pair reads as a rope at any camera distance,
-    // unlike GL line width, which most drivers ignore.
+    smoothed.grip = approachRescueValue(smoothed.grip, link.grip, delta)
+    smoothed.height = approachRescueValue(smoothed.height, link.heightAboveLava, delta)
+    smoothed.appear = Math.min(1, smoothed.appear + delta / ROPE_APPEAR_SECONDS)
+
+    scratch.input.length = presence.length
+    scratch.input.heightAboveLava = smoothed.height
+    scratch.input.grip = smoothed.grip
+    scratch.input.pulsePhase = smoothed.phase
+    scratch.input.reducedMotion = reducedMotion
+    const visual = rescueRopeVisual(scratch.input, scratch.visual)
+    // The caller owns the phase so a rising pulse rate speeds the rope up instead of jumping it.
+    smoothed.phase = (smoothed.phase + visual.pulseHz * TAU * delta) % TAU
+
+    const { direction, lateral, points, segment, mid, scale, rotation, matrix } = scratch
     direction.subVectors(to, from)
-    mesh.position.copy(from).addScaledVector(direction, 0.5)
-    mesh.scale.set(1, length, 1)
-    mesh.quaternion.setFromUnitVectors(up, direction.divideScalar(length))
+    lateral.crossVectors(direction, ROPE_UP)
+    if (lateral.lengthSq() < 1e-8) lateral.set(1, 0, 0)
+    else lateral.normalize()
+
+    for (let index = 0; index < points.length; index += 1) {
+      const along = index / RESCUE_ROPE_SEGMENTS
+      // Zero at both anchors and deepest in the middle, so neither the droop nor the shake can
+      // tear the rope away from the avatar it is tied to.
+      const envelope = rescueRopeSagOffset(along, 1)
+      const point = points[index].copy(from).addScaledVector(direction, along)
+      point.y -= visual.sag * envelope
+      if (visual.tremor > 0) {
+        const shake = Math.sin(smoothed.phase + along * ROPE_TREMOR_WAVES) * visual.tremor * envelope
+        point.addScaledVector(lateral, shake)
+      }
+    }
+
+    const radius = visual.radius * smoothed.appear
+    for (let index = 0; index < RESCUE_ROPE_SEGMENTS; index += 1) {
+      const head = points[index]
+      segment.subVectors(points[index + 1], head)
+      const span = segment.length()
+      mid.copy(head).addScaledVector(segment, 0.5)
+      rotation.setFromUnitVectors(ROPE_UP, segment.divideScalar(Math.max(span, 1e-6)))
+      // A failing grip shortens every strand, leaving gaps that read as fraying without colour.
+      scale.set(radius, span * (1 - visual.strandGap), radius)
+      resources.strands.setMatrixAt(index, matrix.compose(mid, rotation, scale))
+    }
+    resources.strands.instanceMatrix.needsUpdate = true
+
+    // Both markers sit just outside the avatar capsules, so the rope visibly ties onto someone.
+    direction.divideScalar(presence.length)
+    const inset = Math.min(ROPE_ANCHOR_INSET, presence.length * 0.35)
+    resources.rescuerKnot.position.copy(from).addScaledVector(direction, inset)
+    resources.rescuerKnot.scale.setScalar(visual.knotRadius * smoothed.appear)
+    resources.targetRing.position.copy(to).addScaledVector(direction, -inset)
+    resources.targetRing.quaternion.setFromUnitVectors(ROPE_AXIS, direction)
+    resources.targetRing.scale.setScalar(visual.knotRadius * ROPE_RING_SCALE * smoothed.appear)
+
+    const { material } = resources
+    material.color.setHex(visual.color)
+    material.emissive.setHex(visual.emissive)
+    material.emissiveIntensity = visual.emissiveIntensity
+    material.opacity = visual.opacity * smoothed.appear
   })
 
-  return (
-    <mesh ref={rope}>
-      <cylinderGeometry args={[0.045, 0.045, 1, 6, 1, true]} />
-      <meshStandardMaterial
-        color={link.panic ? '#ff8a4c' : '#a8fbff'}
-        emissive={link.panic ? '#ff2d00' : '#1ad7ff'}
-        emissiveIntensity={2.4}
-        transparent
-        opacity={0.92}
-      />
-    </mesh>
-  )
+  return <primitive object={resources.group} />
 }
 
 function NetworkTower({
@@ -495,6 +604,7 @@ function NetworkTower({
   const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const ownPosition = useRef<Vector3 | null>(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
   const avatarPositions = useRef<Map<string, Vector3>>(new Map())
+  const reducedMotion = useReducedMotion()
   useRunnerControls(controls)
 
   useEffect(() => {
@@ -539,6 +649,7 @@ function NetworkTower({
           key={`${link.rescuerId}->${link.targetId}`}
           link={link}
           positions={avatarPositions}
+          reducedMotion={reducedMotion}
         />
       ))}
       <Lava height={match.lavaHeight} />
@@ -868,10 +979,13 @@ function NetworkGameScene({
 function RescueOverlay({ rescue, notice }: { rescue: RescueHudModel; notice: string | null }) {
   return (
     <>
+      {/* The chip repeats in words what the rope shows with pulse, width, and tension, so lava
+          proximity survives a colour-blind viewer, a washed-out stream, and reduced motion. */}
       <div
         className={`rescue-chip ${rescue.state}`}
         data-testid="rescue-status"
         data-state={rescue.state}
+        data-urgency={rescue.linkUrgency ?? ''}
         data-lockout={rescue.lockoutSeconds.toFixed(1)}
       >
         {rescue.statusLabel}

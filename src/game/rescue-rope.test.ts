@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { rescueRopeLength } from './rescue-rope'
+import { RESCUE_ROPE_MIN_LENGTH, rescueRopeLength, rescueRopePresence } from './rescue-rope'
 
 describe('rescue rope length', () => {
   it('measures the gap between two interpolated avatar anchors', () => {
@@ -20,5 +20,59 @@ describe('rescue rope length', () => {
   it('hides a rope too short to define a direction, so the rotation stays stable', () => {
     expect(rescueRopeLength({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 })).toBe(0)
     expect(rescueRopeLength({ x: 0, y: 0, z: 0 }, { x: 0, y: 1e-5, z: 0 })).toBe(0)
+    expect(rescueRopeLength({ x: 0, y: 0, z: 0 }, { x: 0, y: RESCUE_ROPE_MIN_LENGTH, z: 0 }))
+      .toBe(RESCUE_ROPE_MIN_LENGTH)
+  })
+})
+
+describe('rescue rope presence', () => {
+  const link = { rescuerId: 'rescuer', targetId: 'target' }
+
+  it('draws a published link between two rendered avatars, and reports its span once', () => {
+    const presence = rescueRopePresence(link, { x: 0, y: 0, z: 0 }, { x: 3, y: 4, z: 0 })
+
+    expect(presence).toEqual({ visible: true, length: 5 })
+  })
+
+  it('hides a link whose ends are not two different runners', () => {
+    const anchor = { x: 0, y: 0, z: 0 }
+    const far = { x: 3, y: 4, z: 0 }
+
+    expect(rescueRopePresence({ rescuerId: 'same', targetId: 'same' }, anchor, far))
+      .toEqual({ visible: false, length: 0 })
+    expect(rescueRopePresence({ rescuerId: '', targetId: 'target' }, anchor, far))
+      .toEqual({ visible: false, length: 0 })
+    expect(rescueRopePresence({ rescuerId: 'rescuer', targetId: '' }, anchor, far))
+      .toEqual({ visible: false, length: 0 })
+  })
+
+  it('hides a link an avatar has not rendered for, or has already left', () => {
+    expect(rescueRopePresence(link, undefined, { x: 1, y: 1, z: 1 }))
+      .toEqual({ visible: false, length: 0 })
+    expect(rescueRopePresence(link, { x: 1, y: 1, z: 1 }, null))
+      .toEqual({ visible: false, length: 0 })
+  })
+
+  it('writes into a reused result, so a live rope allocates nothing per frame', () => {
+    const target = { visible: false, length: 0 }
+    const drawn = rescueRopePresence(link, { x: 0, y: 0, z: 0 }, { x: 3, y: 4, z: 0 }, target)
+
+    expect(drawn).toBe(target)
+    expect(target).toEqual({ visible: true, length: 5 })
+
+    // The next frame loses an avatar: the stale span must not survive in the reused result.
+    rescueRopePresence(link, undefined, { x: 3, y: 4, z: 0 }, target)
+    expect(target).toEqual({ visible: false, length: 0 })
+  })
+
+  it('reports zero length for every hidden frame, so no transform can read a stale span', () => {
+    const hidden = [
+      rescueRopePresence(link, { x: Number.NaN, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }),
+      rescueRopePresence(link, { x: 0, y: 0, z: 0 }, { x: Number.POSITIVE_INFINITY, y: 0, z: 0 }),
+      rescueRopePresence(link, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
+      rescueRopePresence(link, { x: 0, y: 0, z: 0 }, { x: 0, y: 1e-5, z: 0 }),
+    ]
+
+    for (const presence of hidden) expect(presence).toEqual({ visible: false, length: 0 })
   })
 })

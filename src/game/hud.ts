@@ -1,3 +1,5 @@
+import { rescueGripBand, rescueRopeUrgency, rescueRopeUrgencyBand } from './rescue-rope-visuals'
+import type { RescueGripBand, RescueRopeUrgencyBand } from './rescue-rope-visuals'
 import type { NetworkMatchSnapshot, NetworkPlayerSnapshot } from '../shared/multiplayer-protocol'
 
 export interface OnlineHudModel {
@@ -11,10 +13,20 @@ export interface OnlineHudModel {
   escapedCount: number
 }
 
+/**
+ * One authoritative link, reduced to the published facts the in-scene rope needs.
+ *
+ * Only server-owned values appear here. How the rope turns them into width, colour, pulse, sag, and
+ * fray is `rescue-rope-visuals.ts`'s business, so the readout and the rope can never disagree about
+ * what the room said.
+ */
 export interface RescueLinkView {
   rescuerId: string
   targetId: string
-  panic: boolean
+  /** Published grip of the rescuer holding this link, normalized to 0..1. */
+  grip: number
+  /** Metres the target hangs above the authoritative lava surface. */
+  heightAboveLava: number
 }
 
 /** The last link this client saw, so a cleared link can be classified without server history. */
@@ -60,8 +72,11 @@ export type RescueOutcome = 'rescued' | 'exhausted' | 'lost'
  */
 export type RescueHudState = 'idle' | 'ready' | 'holding' | 'held' | 'cooldown' | 'exhausted'
 
-/** Grip is a spendable resource, so it is banded rather than left as a bare percentage. */
-export type RescueGripBand = 'steady' | 'warning' | 'danger'
+/**
+ * Grip bands and lava-proximity bands are defined once, next to the rope that draws them, so the
+ * meter and the rope always describe the same published state.
+ */
+export type { RescueGripBand, RescueRopeUrgencyBand }
 
 export interface RescueHudModel {
   state: RescueHudState
@@ -73,6 +88,11 @@ export interface RescueHudModel {
   rescuedByLabel: string | null
   /** Single line for the chip, already resolved for the current state. */
   statusLabel: string
+  /**
+   * Lava proximity of the link the local runner is in, either end, or `null` when they are in none.
+   * The same band the rope draws, so urgency reaches a player who cannot use the rope's colour.
+   */
+  linkUrgency: RescueRopeUrgencyBand | null
   promptVisible: boolean
   outcome: RescueOutcome | null
   announcement: string | null
@@ -90,13 +110,16 @@ export interface RescueHudModel {
  */
 const RESCUE_PROMPT_REACH = 2.4
 const RESCUE_PROMPT_DROP = 0.3
-const RESCUE_PANIC_HEIGHT = 1.5
 const RESCUE_LANDING_GAIN = 0.3
 const RESCUE_RELEASE_COOLDOWN = 1.4
 const RESCUE_EXHAUSTION_COOLDOWN = 3
-/** Grip thresholds the warning and danger bands switch at. */
-const GRIP_WARNING = 0.55
-const GRIP_DANGER = 0.25
+
+/** Said out loud alongside the rope's pulse and taut shape, so urgency is never hue-only. */
+const URGENCY_SUFFIXES: Record<RescueRopeUrgencyBand, string> = {
+  calm: '',
+  urgent: ' · 용암 근접',
+  critical: ' · 용암 직전',
+}
 
 const OUTCOME_LABELS: Record<RescueOutcome, string> = {
   rescued: '구조 성공',
@@ -121,6 +144,14 @@ const LAVA_LABELS: Record<string, string> = {
 const WINNER_LABELS: Record<string, string> = {
   runners: '도망자 승리',
   warden: '지옥 간수 승리',
+}
+
+/**
+ * A published grip, clamped into the range the meter and the rope both assume. An unreadable value
+ * reads as a full grip: the readout must not invent a fraying rescue the snapshot never described.
+ */
+function publishedGrip(grip: number | undefined): number {
+  return Number.isFinite(grip) ? Math.min(1, Math.max(0, grip!)) : 1
 }
 
 export function formatMatchClock(elapsedSeconds: number, durationSeconds: number): string {
@@ -156,14 +187,24 @@ export function rescueHudModel(
     links.push({
       rescuerId: player.id,
       targetId: target.id,
-      panic: target.y - lavaHeight < RESCUE_PANIC_HEIGHT,
+      grip: publishedGrip(player.grip),
+      heightAboveLava: target.y - lavaHeight,
     })
   }
 
   const linked = Boolean(own) && own!.grabTargetId !== ''
-  const grip = Number.isFinite(own?.grip) ? Math.min(1, Math.max(0, own!.grip)) : 1
+  const grip = publishedGrip(own?.grip)
 
   const rescued = Boolean(own) && own!.grabbedById !== ''
+  // Either end of the local runner's own link: being hauled out of the lava is as urgent as
+  // hauling, and both players are told the same thing. Read only while this client is really in a
+  // link, so a chip with no rescue on it can never wear a lava warning.
+  const ownLink = linked || rescued
+    ? links.find((link) => link.rescuerId === ownPlayerId || link.targetId === ownPlayerId)
+    : undefined
+  const linkUrgency = ownLink
+    ? rescueRopeUrgencyBand(rescueRopeUrgency(ownLink.heightAboveLava))
+    : null
 
   // A lockout the clock has already passed is over, and one further away than the longest cooldown
   // the room can charge is a leftover from a restarted match rather than a live penalty.
@@ -221,15 +262,19 @@ export function rescueHudModel(
     linked,
     showGrip: linked || grip < 1 || locked,
     gripPercent: Math.round(grip * 100),
-    gripBand: grip <= GRIP_DANGER ? 'danger' : grip <= GRIP_WARNING ? 'warning' : 'steady',
+    gripBand: rescueGripBand(grip),
     targetLabel: linked ? '구조 중' : null,
     rescuedByLabel: rescued ? '구조 받는 중' : null,
-    // A locked-out player is told how long, whichever failure put them there.
+    // A locked-out player is told how long, whichever failure put them there, and a live link says
+    // in words how close the lava is instead of leaving that to the rope's colour.
     statusLabel: state === 'cooldown'
       ? `구조 재시도 ${lockoutSeconds.toFixed(1)}초`
       : state === 'exhausted' && lockoutSeconds > 0
           ? `그립 소진 · ${lockoutSeconds.toFixed(1)}초`
-          : STATE_LABELS[state],
+          : state === 'holding' || state === 'held'
+              ? `${STATE_LABELS[state]}${URGENCY_SUFFIXES[linkUrgency ?? 'calm']}`
+              : STATE_LABELS[state],
+    linkUrgency,
     promptVisible,
     outcome,
     announcement: linked ? '구조 시작' : outcome === null ? null : OUTCOME_LABELS[outcome],

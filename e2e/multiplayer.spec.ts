@@ -7,6 +7,14 @@ import { HELLBREAK_ROOM_NAME } from '../src/shared/multiplayer-protocol'
 const SCENE_TIMEOUT_MS = 20_000
 const INPUT_OBSERVATION_MS = 8_000
 const LAVA_LABEL = /^용암 · (상승 중|폭발 임박|폭발 상승)$/
+/**
+ * A rescue chip that is both holding a teammate and publishing a lava-proximity band, matched in
+ * one selector. A live link lasts a fraction of a second, so reading the two attributes in separate
+ * round trips would straddle its end and pair a state with an urgency from a different frame.
+ */
+const HOLDING_WITH_URGENCY = ['calm', 'urgent', 'critical']
+  .map((band) => `[data-testid="rescue-status"][data-state="holding"][data-urgency="${band}"]`)
+  .join(', ')
 
 test.describe.configure({ timeout: 90_000 })
 
@@ -245,11 +253,9 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       let domIncomingObserved = false
       let readoutObserved = false
       let jumpSequence = 3
-      for (
-        let attempt = 0;
-        attempt < 4 && (!schemaObserved || !domTargetObserved || !domIncomingObserved || !readoutObserved);
-        attempt += 1
-      ) {
+      const allObserved = () => schemaObserved && domTargetObserved && domIncomingObserved
+        && readoutObserved
+      for (let attempt = 0; attempt < 4 && !allObserved(); attempt += 1) {
         room.send('input', {
           sequence: jumpSequence,
           forward: false,
@@ -290,20 +296,22 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
             { timeout: 1_200, intervals: [25] },
           ).toBe(rescuerId),
           // The player-facing readout has to say the same thing the schema does: holding a
-          // teammate, with a banded grip meter on screen rather than a bare number. Which band it
-          // lands in depends on how much grip earlier attempts burned, so any band counts.
+          // teammate, with lava proximity banded on the chip rather than left to the rope's
+          // colour, and a banded grip meter on screen rather than a bare number. Which grip band
+          // it lands in depends on how much grip earlier attempts burned, so any band counts.
           readoutObserved ? Promise.resolve() : expect.poll(async () => ({
-            state: await page.getByTestId('rescue-status').getAttribute('data-state'),
+            holdingWithUrgency: await page.locator(HOLDING_WITH_URGENCY).count(),
             banded: ['steady', 'warning', 'danger'].includes(
               (await page.getByTestId('rescue-grip').getAttribute('data-grip-band')) ?? '',
             ),
-          }), { timeout: 1_200, intervals: [25] }).toEqual({ state: 'holding', banded: true }),
+          }), { timeout: 1_200, intervals: [25] })
+            .toEqual({ holdingWithUrgency: 1, banded: true }),
         ])
         schemaObserved ||= checks[0].status === 'fulfilled'
         domTargetObserved ||= checks[1].status === 'fulfilled'
         domIncomingObserved ||= checks[2].status === 'fulfilled'
         readoutObserved ||= checks[3].status === 'fulfilled'
-        if (!schemaObserved || !domTargetObserved || !domIncomingObserved || !readoutObserved) {
+        if (!allObserved()) {
           await expect.poll(() => room.state.players.get(jumperId)?.grounded ?? false, {
             timeout: INPUT_OBSERVATION_MS,
             intervals: [50],

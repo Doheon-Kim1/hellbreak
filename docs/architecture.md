@@ -103,6 +103,41 @@ is the room's own exhaustion rule and is unreachable any other way while a link 
 is visible only as the rescue receipt advancing with no link ever published—is reported as `lost`,
 a failed rescue with no cause claimed.
 
+#### Rescue rope presentation
+
+The in-scene rope is split so VFX iteration cannot reach gameplay logic:
+
+| Module | Owns |
+| --- | --- |
+| `src/game/rescue-rope.ts` | whether a link is drawable at all: two distinct named runners, both anchors present and finite, and a span long enough to orient a mesh along |
+| `src/game/rescue-rope-visuals.ts` | pure styling math: urgency, grip band, width, colour, pulse, sag/tension, fray, tremor, and the smoothing of published values |
+| `src/game/rescue-rope-material.ts` | the Three objects one rope owns for its life, and their disposal |
+
+None of it is authority. The rope reads `grabTargetId`, `grabbedById`, `grip`, and the authoritative
+lava height out of the published snapshot and draws them; it never sends anything, so a tampered
+client only changes its own picture.
+
+Urgency is deliberately carried on more than hue, because the rope has to read on a stream, on a
+phone, and for a colour-blind viewer:
+
+- **lava proximity** drives rope width, pulse *rate*, sag (a slack rope pulls taut as the lava
+  closes in), colour, and a banded word on the HUD chip (`구조 중 · 용암 근접` / `· 용암 직전`);
+- **rescuer grip** drives fray gaps between strands, a tremor, and a shallow flicker that never
+  fades the rope out of sight — independent of lava proximity, so a slipping grip on safe ground and
+  a full grip over the lava stay distinguishable;
+- the two ends differ by **shape**: a knot on the rescuer, a ring on the runner being hauled up;
+- the calm rope stays cyan and the critical rope goes white-hot rather than orange, so it never
+  blends into the lava it is being pulled out of;
+- `prefers-reduced-motion` stops the pulse and the tremor, and width, tension, fray, colour, and the
+  chip still separate every band.
+
+Performance is a hard constraint on mobile, so nothing is rebuilt per frame. Geometry, material, and
+the instance buffer are created once per link; a frame writes instance matrices, two endpoint
+transforms, and one colour/opacity update, and allocates nothing. The rope is one `InstancedMesh` of
+14 unit cylinders plus two markers, and every Three resource is disposed exactly once when the link
+unmounts. Published grip and lava height are eased toward their latest values with a frame-rate
+independent approach, so a 20 Hz patch stream cannot make the rope step or strobe.
+
 The cooldown countdown is a **client-side mirror**, not published state: the room keeps
 `grabCooldownUntil` private and re-decides every tick. The client rebuilds it from milestones it
 can already observe—a link disappearing, or the server rescue receipt advancing without a link

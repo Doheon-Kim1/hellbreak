@@ -168,22 +168,92 @@ describe('rescue HUD model', () => {
     expect(model.rescuedByLabel).toBeNull()
     expect(model.state).toBe('holding')
     expect(model.promptVisible).toBe(false)
+    // The rope is handed published facts, never a styling decision: it derives its own urgency.
     expect(model.links).toEqual([
-      { rescuerId: 'own', targetId: 'other', panic: false },
+      { rescuerId: 'own', targetId: 'other', grip: 0.42, heightAboveLava: 3.4 },
     ])
   })
 
-  it('marks a link as panicking when the target hangs just above the lava', () => {
+  it('measures every link against the authoritative lava surface, including other pairs', () => {
     const model = rescueHudModel(
       [
-        runner({ grabTargetId: 'other', grip: 0.5 }),
-        runner({ id: 'other', x: 1.2, y: lava + 1.1, grounded: false, grabbedById: 'own' }),
+        runner({ id: 'other', x: 20 }),
+        runner({ id: 'rescuer', grip: 0.3, grabTargetId: 'falling' }),
+        runner({ id: 'falling', y: lava + 1.1, grounded: false, grabbedById: 'rescuer' }),
       ],
       'own',
       lava,
     )
 
-    expect(model.links).toEqual([{ rescuerId: 'own', targetId: 'other', panic: true }])
+    expect(model.links).toEqual([
+      { rescuerId: 'rescuer', targetId: 'falling', grip: 0.3, heightAboveLava: 1.1 },
+    ])
+    // A spectator's own readout stays idle while it draws someone else's rope.
+    expect(model.linked).toBe(false)
+    expect(model.linkUrgency).toBeNull()
+  })
+
+  it('reads an unpublished rescuer grip as a full one rather than as a fraying rope', () => {
+    const model = rescueHudModel(
+      [
+        runner({ grabTargetId: 'other', grip: Number.NaN }),
+        runner({ id: 'other', x: 1.2, y: -0.6, grounded: false, grabbedById: 'own' }),
+      ],
+      'own',
+      lava,
+    )
+
+    expect(model.links[0].grip).toBe(1)
+    expect(model.gripBand).toBe('steady')
+  })
+
+  it('bands the local link by lava proximity and says it in words, not only in the rope', () => {
+    const holding = (targetY: number) => rescueHudModel(
+      [
+        runner({ grabTargetId: 'other', grip: 0.8 }),
+        runner({ id: 'other', x: 1.2, y: targetY, grounded: false, grabbedById: 'own' }),
+      ],
+      'own',
+      lava,
+    )
+
+    const calm = holding(lava + 4)
+    expect(calm.linkUrgency).toBe('calm')
+    expect(calm.statusLabel).toBe('구조 중')
+
+    const urgent = holding(lava + 1.1)
+    expect(urgent.linkUrgency).toBe('urgent')
+    expect(urgent.statusLabel).toBe('구조 중 · 용암 근접')
+
+    const critical = holding(lava + 0.2)
+    expect(critical.linkUrgency).toBe('critical')
+    expect(critical.statusLabel).toBe('구조 중 · 용암 직전')
+
+    // The runner being hauled up is told the same thing about their own drop.
+    const held = rescueHudModel(
+      [
+        runner({ y: lava + 0.2, grounded: false, grabbedById: 'other' }),
+        runner({ id: 'other', x: 1.2, grabTargetId: 'own' }),
+      ],
+      'own',
+      lava,
+    )
+    expect(held.linkUrgency).toBe('critical')
+    expect(held.statusLabel).toBe('구조 받는 중 · 용암 직전')
+
+    // No link, nothing to band — an idle chip must never wear a lava warning.
+    expect(rescueHudModel([runner()], 'own', lava).linkUrgency).toBeNull()
+    const bystander = rescueHudModel(
+      [
+        runner({ y: lava + 0.2, grounded: false }),
+        runner({ id: 'other', x: 1.2, grabTargetId: 'third' }),
+        runner({ id: 'third', y: lava + 0.2, grounded: false, grabbedById: 'other' }),
+      ],
+      'own',
+      lava,
+    )
+    expect(bystander.links).toHaveLength(1)
+    expect(bystander.linkUrgency).toBeNull()
   })
 
   it('announces only link milestones, never a per-frame grip or coordinate', () => {
@@ -421,7 +491,9 @@ describe('rescue HUD model', () => {
     expect(model.targetLabel).toBeNull()
     expect(model.state).toBe('held')
     // The rope is drawn from the authoritative link even though the local runner is the target.
-    expect(model.links).toEqual([{ rescuerId: 'other', targetId: 'own', panic: false }])
+    expect(model.links).toEqual([
+      { rescuerId: 'other', targetId: 'own', grip: 1, heightAboveLava: 3.4 },
+    ])
     // A runner who is already being pulled up is not offered a rescue prompt of their own.
     expect(model.promptVisible).toBe(false)
   })
