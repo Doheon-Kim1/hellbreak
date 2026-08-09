@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+: "${NEXT_PUBLIC_GAME_SERVER_URL:=https://hellbreak-room.onrender.com}"
+export NEXT_PUBLIC_GAME_SERVER_URL
 REMOTE_URL=$(git -C "$ROOT" remote get-url origin)
 DEPLOY_DIR=$(mktemp -d)
 trap 'rm -rf "$DEPLOY_DIR"' EXIT
