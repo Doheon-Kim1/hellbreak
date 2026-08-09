@@ -35,7 +35,7 @@
 The transport-independent room simulation now lives in `src/server/room-simulation.ts`.
 It already enforces the core Room Host boundary:
 
-- clients submit directional and jump intent plus a monotonically increasing sequence number;
+- clients submit directional, jump, and held rescue intent plus a monotonically increasing sequence number;
 - the room derives player ownership from the authenticated connection session instead of accepting a client-supplied player ID;
 - clients cannot submit authoritative coordinates;
 - stale, replayed, malformed, or non-boolean input is rejected;
@@ -46,21 +46,32 @@ It already enforces the core Room Host boundary:
 - each room is limited to six authenticated players and disconnects remove input ownership immediately;
 - room state advances only through the server tick function.
 
+### Authoritative Lava Lifeline
+
+The online room implements one runner-to-runner rescue link without weakening the input boundary:
+
+- the client sends only a held `grab` boolean and never a target ID, coordinate, force, grip, or completion claim;
+- the room deterministically selects an eligible airborne or lower teammate inside the validated camera cone and reach;
+- each runner may participate in at most one incoming or outgoing link, preventing chains, cycles, and contested multi-grabs;
+- the room owns pull/lift force, rescuer counter-drag, grip drain/regeneration, cooldowns, safe-landing completion, and cleanup on release, death, escape, disconnect, restart, or match finish;
+- a target near the authoritative lava surface receives a stronger panic pull while grip drain and rescuer drag also increase; rescue never grants lava immunity;
+- Colyseus publishes only presentation state (`grabTargetId`, `grabbedById`, normalized `grip`, and `lastAcknowledgedGrab`) for the rope, HUD, and stable test receipts.
+
 ## Implemented Colyseus room adapter
 
 `src/server/hellbreak-room.ts` wraps the transport-independent simulation in a Colyseus room:
 
 - `HellbreakRoomState` and `PlayerSchema` broadcast the authoritative player map;
 - room creation and `joinById` use server-issued room and session IDs;
-- input messages contain directional booleans, sprint, jump, camera yaw, and a monotonic sequence number—never client coordinates or physics state;
+- input messages contain directional booleans, sprint, jump, held rescue, camera yaw, and a monotonic sequence number—never client coordinates, rescue targets, forces, grip, or physics state;
 - a 20 Hz server tick advances horizontal and vertical movement against bounds derived from `PLAYGROUND_ROUTE`;
 - `HellbreakRoomState` publishes authoritative lava height/phase, match phase/winner, and per-player grounded/alive/escaped state with `x/y/z` and the last processed input sequence;
 - clients receive join, movement, and disconnect patches through `@colyseus/sdk`;
 - the browser interpolates rendered avatars toward the latest server position.
 
-`src/server/colyseus-server.ts` runs the WebSocket process separately from Next.js on port 2567 and provides `/health`. Development uses `npm run dev` to start both processes. Browser E2E coverage creates two isolated contexts, joins them to one room, observes shared movement, authoritative jump/landing and match HUD state, and verifies disconnect cleanup.
+`src/server/colyseus-server.ts` runs the WebSocket process separately from Next.js on port 2567 and provides `/health`. Development uses `npm run dev` to start both processes. Browser E2E coverage uses two isolated browser contexts for shared movement, authoritative jump/landing, match HUD, and disconnect cleanup. The Lava Lifeline E2E pairs the real browser rescue control with a second real Colyseus room client, then observes the server-selected bidirectional link, pull displacement, grip drain, accepted receipt, and release cleanup without injecting a target or pose.
 
-The current network slice uses deterministic server-side kinematic collision for the fixed climb route rather than running Rapier in the room process. This keeps the competitive rules pure and testable while the client retains Rapier for the credential-free local bot match. Moving platforms, grab/pull constraints, items, combat, and full server-side hazard physics remain future slices.
+The current network slice uses deterministic server-side kinematic collision for the fixed climb route rather than running Rapier in the room process. This keeps movement and the Lava Lifeline constraint pure and testable while the client retains Rapier for the credential-free local bot match. Moving platforms, multi-runner rescue chains, items, combat, and full server-side hazard physics remain future slices.
 
 The adapter keeps competitive rules independent from the networking framework and allows the local bot match to remain credential-free.
 

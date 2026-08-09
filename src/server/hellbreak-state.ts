@@ -12,6 +12,13 @@ export class PlayerSchema extends Schema {
   lastProcessedInput = 0
   /** Sequence of the last jump the server actually applied as a grounded takeoff. */
   lastAcknowledgedJump = 0
+  /** Outgoing rescue link; empty string means "not rescuing anyone". */
+  grabTargetId = ''
+  /** Incoming rescue link, derived by the room and never accepted from a client. */
+  grabbedById = ''
+  grip = 1
+  /** Sequence of the last input the room actually turned into a rescue link. */
+  lastAcknowledgedGrab = 0
 }
 
 defineTypes(PlayerSchema, {
@@ -25,6 +32,10 @@ defineTypes(PlayerSchema, {
   escaped: 'boolean',
   lastProcessedInput: 'number',
   lastAcknowledgedJump: 'number',
+  grabTargetId: 'string',
+  grabbedById: 'string',
+  grip: 'number',
+  lastAcknowledgedGrab: 'number',
 })
 
 export class HellbreakRoomState extends Schema {

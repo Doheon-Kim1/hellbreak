@@ -1,4 +1,8 @@
-export type RunnerControl = 'forward' | 'backward' | 'left' | 'right' | 'sprint'
+/**
+ * `rescue` is held intent shared by the keyboard and the mobile button. Only the online room
+ * consumes it; the local bot match has no rescue mechanic and ignores it entirely.
+ */
+export type RunnerControl = 'forward' | 'backward' | 'left' | 'right' | 'sprint' | 'rescue'
 
 export type RunnerInput = Record<RunnerControl, boolean>
 export type RunnerControlSources = Record<RunnerControl, readonly string[]>
@@ -10,6 +14,7 @@ export function createRunnerControlSources(): RunnerControlSources {
     left: [],
     right: [],
     sprint: [],
+    rescue: [],
   }
 }
 
@@ -35,5 +40,6 @@ export function readRunnerInput(controls: RunnerControlSources): RunnerInput {
     left: controls.left.length > 0,
     right: controls.right.length > 0,
     sprint: controls.sprint.length > 0,
+    rescue: controls.rescue.length > 0,
   }
 }

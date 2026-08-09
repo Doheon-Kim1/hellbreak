@@ -49,6 +49,12 @@ function snapshotPlayers(state: HellbreakRoomState | undefined): NetworkPlayerSn
       escaped: player.escaped,
       lastProcessedInput: player.lastProcessedInput,
       lastAcknowledgedJump: player.lastAcknowledgedJump,
+      // New Schema fields may be absent during the first incremental patch from an older or
+      // not-yet-fully-decoded state. Normalize them before any HUD formatting or link logic runs.
+      grabTargetId: player.grabTargetId ?? '',
+      grabbedById: player.grabbedById ?? '',
+      grip: Number.isFinite(player.grip) ? player.grip : 1,
+      lastAcknowledgedGrab: player.lastAcknowledgedGrab ?? 0,
     })
   })
   return players.sort((left, right) => left.id.localeCompare(right.id))

@@ -15,8 +15,9 @@ import { abilitySpec, authoritativeHellEvent, hellEventAt, pickupAbility } from 
 import type { HellEventState, RunnerAbility } from '../game/hell-events'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
-import { formatMatchClock, onlineHudModel } from '../game/hud'
-import type { OnlineHudModel } from '../game/hud'
+import { formatMatchClock, nextRescueLinkMemory, onlineHudModel, rescueHudModel } from '../game/hud'
+import type { OnlineHudModel, RescueHudModel, RescueLinkMemory, RescueLinkView } from '../game/hud'
+import { rescueRopeLength } from '../game/rescue-rope'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { interpolateNetworkPosition } from '../network/interpolation'
@@ -55,7 +56,10 @@ function useRunnerControls(controls: RunnerControls) {
           : code === 'KeyA' || code === 'ArrowLeft' ? 'left'
             : code === 'KeyD' || code === 'ArrowRight' ? 'right'
               : code === 'ShiftLeft' || code === 'ShiftRight' ? 'sprint'
-                : null
+                // Held rescue intent. Only the online room consumes it; Q/E spectator switching
+                // is bound separately and is active only after elimination.
+                : code === 'KeyE' ? 'rescue'
+                  : null
       if (control) {
         controls.input.current = setRunnerControlSource(
           controls.input.current,
@@ -277,6 +281,7 @@ function PlayerRunner({
       controls.abilityQueued.current = false
     }
 
+    // The local bot match has no rescue mechanic, so `input.rescue` is deliberately unread here.
     const input = readRunnerInput(controls.input.current)
     const baseSpeed = input.sprint ? SPRINT_SPEED : PLAYER_SPEED
     const speedMultiplier = elapsed < rocketUntil.current ? abilitySpec('rocket-boots').speedMultiplier : 1
@@ -370,10 +375,12 @@ function NetworkAvatar({
   player,
   isOwn,
   ownPosition,
+  positions,
 }: {
   player: NetworkPlayerSnapshot
   isOwn: boolean
   ownPosition: RefObject<Vector3 | null>
+  positions: RefObject<Map<string, Vector3>>
 }) {
   const avatar = useRef<Mesh>(null)
   const target = useRef(new Vector3(player.x, player.y, player.z)).current
@@ -381,6 +388,12 @@ function NetworkAvatar({
   useEffect(() => {
     target.set(player.x, player.y, player.z)
   }, [player.x, player.y, player.z, target])
+
+  // A leaver must not leave a stale anchor behind for the rope to follow.
+  useEffect(() => {
+    const registry = positions.current
+    return () => { registry?.delete(player.id) }
+  }, [player.id, positions])
 
   useFrame((_, delta) => {
     if (!avatar.current) return
@@ -391,6 +404,7 @@ function NetworkAvatar({
       1 - Math.exp(-delta * 12),
     )
     avatar.current.position.set(smoothed.x, smoothed.y, smoothed.z)
+    positions.current?.set(player.id, avatar.current.position)
     if (isOwn) ownPosition.current = avatar.current.position
   })
 
@@ -414,12 +428,60 @@ function NetworkAvatar({
   )
 }
 
+/**
+ * Bright rope between two linked avatars. It follows the interpolated render positions so it stays
+ * attached between authoritative patches, and turns hot during the lava panic band.
+ */
+function RescueRope({
+  link,
+  positions,
+}: {
+  link: RescueLinkView
+  positions: RefObject<Map<string, Vector3>>
+}) {
+  const rope = useRef<Mesh>(null)
+  const direction = useMemo(() => new Vector3(), [])
+  const up = useMemo(() => new Vector3(0, 1, 0), [])
+
+  useFrame(() => {
+    const mesh = rope.current
+    if (!mesh) return
+    const from = positions.current?.get(link.rescuerId)
+    const to = positions.current?.get(link.targetId)
+    // A missing, degenerate, or non-finite pair hides the rope instead of poisoning its transform.
+    const length = rescueRopeLength(from, to)
+    mesh.visible = length > 0
+    if (!mesh.visible || !from || !to) return
+
+    // A unit cylinder stretched between the pair reads as a rope at any camera distance,
+    // unlike GL line width, which most drivers ignore.
+    direction.subVectors(to, from)
+    mesh.position.copy(from).addScaledVector(direction, 0.5)
+    mesh.scale.set(1, length, 1)
+    mesh.quaternion.setFromUnitVectors(up, direction.divideScalar(length))
+  })
+
+  return (
+    <mesh ref={rope}>
+      <cylinderGeometry args={[0.045, 0.045, 1, 6, 1, true]} />
+      <meshStandardMaterial
+        color={link.panic ? '#ff8a4c' : '#a8fbff'}
+        emissive={link.panic ? '#ff2d00' : '#1ad7ff'}
+        emissiveIntensity={2.4}
+        transparent
+        opacity={0.92}
+      />
+    </mesh>
+  )
+}
+
 function NetworkTower({
   players,
   match,
   ownPlayerId,
   controls,
   active,
+  rescueLinks,
   sendInput,
 }: {
   players: NetworkPlayerSnapshot[]
@@ -427,10 +489,12 @@ function NetworkTower({
   ownPlayerId: string
   controls: RunnerControls
   active: boolean
+  rescueLinks: RescueLinkView[]
   sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
 }) {
   const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const ownPosition = useRef<Vector3 | null>(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
+  const avatarPositions = useRef<Map<string, Vector3>>(new Map())
   useRunnerControls(controls)
 
   useEffect(() => {
@@ -439,11 +503,12 @@ function NetworkTower({
       return
     }
     const timer = window.setInterval(() => {
-      const input = readRunnerInput(controls.input.current)
+      const { rescue, ...movement } = readRunnerInput(controls.input.current)
       // A jump is sent as a single-tick edge; the server still re-validates ground contact.
       const jump = controls.jumpQueued.current
       controls.jumpQueued.current = false
-      sendInput({ ...input, jump, cameraYaw: cameraOrbit.current.yaw })
+      // Rescue is sent as held state only. The server picks the target, force, and grip.
+      sendInput({ ...movement, jump, grab: rescue, cameraYaw: cameraOrbit.current.yaw })
     }, 50)
     return () => window.clearInterval(timer)
   }, [active, controls, sendInput])
@@ -466,6 +531,14 @@ function NetworkTower({
           player={player}
           isOwn={player.id === ownPlayerId}
           ownPosition={ownPosition}
+          positions={avatarPositions}
+        />
+      ))}
+      {rescueLinks.map((link) => (
+        <RescueRope
+          key={`${link.rescuerId}->${link.targetId}`}
+          link={link}
+          positions={avatarPositions}
         />
       ))}
       <Lava height={match.lavaHeight} />
@@ -743,6 +816,7 @@ function NetworkGameScene({
   ownPlayerId,
   controls,
   active,
+  rescueLinks,
   sendInput,
   onReady,
   onFailure,
@@ -752,6 +826,7 @@ function NetworkGameScene({
   ownPlayerId: string
   controls: RunnerControls
   active: boolean
+  rescueLinks: RescueLinkView[]
   sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
   onReady: () => void
   onFailure: (message: string) => void
@@ -775,6 +850,7 @@ function NetworkGameScene({
           ownPlayerId={ownPlayerId}
           controls={controls}
           active={active}
+          rescueLinks={rescueLinks}
           sendInput={sendInput}
         />
       </Physics>
@@ -782,7 +858,47 @@ function NetworkGameScene({
   )
 }
 
-function MobileControls({ controls, heldAbility }: { controls: RunnerControls; heldAbility: RunnerAbility | null }) {
+const RESCUE_STATE_LABELS: Record<RescueHudModel['state'], string> = {
+  idle: 'E · 구조 대기',
+  ready: 'E · 구조 가능',
+  holding: '구조 중',
+  held: '구조 받는 중',
+}
+
+/**
+ * Local-runner rescue readout for the online match. The chip keeps one place in the layout and
+ * only swaps its state, so a teammate drifting across the reach boundary cannot make it flicker.
+ */
+function RescueOverlay({ rescue, notice }: { rescue: RescueHudModel; notice: string | null }) {
+  return (
+    <>
+      <div className={`rescue-chip ${rescue.state}`} data-testid="rescue-status" data-state={rescue.state}>
+        {rescue.targetLabel ?? rescue.rescuedByLabel ?? RESCUE_STATE_LABELS[rescue.state]}
+      </div>
+      {rescue.showGrip && (
+        <div
+          className={`grip-meter ${rescue.linked ? 'draining' : ''}`}
+          data-testid="rescue-grip"
+          data-grip-percent={String(rescue.gripPercent)}
+        >
+          <strong>그립</strong>
+          <span><i style={{ width: `${rescue.gripPercent}%` }} /></span>
+        </div>
+      )}
+      <div className="rescue-notice" role="status" data-testid="rescue-notice">{notice ?? ''}</div>
+    </>
+  )
+}
+
+function MobileControls({
+  controls,
+  heldAbility,
+  rescueEnabled,
+}: {
+  controls: RunnerControls
+  heldAbility: RunnerAbility | null
+  rescueEnabled: boolean
+}) {
   const holdProps = (control: RunnerControl) => {
     const setPointer = (event: ReactPointerEvent<HTMLButtonElement>, pressed: boolean) => {
       controls.input.current = setRunnerControlSource(
@@ -825,6 +941,12 @@ function MobileControls({ controls, heldAbility }: { controls: RunnerControls; h
           {heldAbility ? abilitySpec(heldAbility).label : '능력'}
         </button>
         <button type="button" aria-label="달리기" {...holdProps('sprint')}>달리기</button>
+        {/* The local bot match has no rescue mechanic, so the hold button is online-only. */}
+        {rescueEnabled && (
+          <button type="button" aria-label="구조 잡기" className="rescue" data-testid="mobile-rescue" {...holdProps('rescue')}>
+            구조
+          </button>
+        )}
         <button
           type="button"
           aria-label="점프"
@@ -875,6 +997,15 @@ export default function HellbreakGame() {
   const network = useHellbreakRoom()
   const onlineConnected = gameMode === 'online' && network.status === 'connected'
   const onlineHud = onlineHudModel(network.match, network.players, network.ownPlayerId)
+  // The link the previous patch showed, so an ended link can be told apart from a completed one.
+  const rescueMemory = useRef<RescueLinkMemory | null>(null)
+  const [rescueNotice, setRescueNotice] = useState<string | null>(null)
+  const rescue = rescueHudModel(
+    network.players,
+    network.ownPlayerId,
+    network.match.lavaHeight,
+    rescueMemory.current,
+  )
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
   const rawMatch = createMatch({ escapedRunners: escapedBots + Number(playerEscaped) })
@@ -894,6 +1025,22 @@ export default function HellbreakGame() {
     const timeout = window.setTimeout(() => setFeedback(null), 2400)
     return () => window.clearTimeout(timeout)
   }, [feedback])
+
+  // Advanced after the render that consumed it, so the next patch can classify a link that ended.
+  useEffect(() => {
+    rescueMemory.current = nextRescueLinkMemory(
+      rescueMemory.current,
+      network.players,
+      network.ownPlayerId,
+    )
+  }, [network.players, network.ownPlayerId])
+
+  // Only link milestones reach the live region, and each one is held until the next milestone.
+  // Grip and coordinates move 20 times a second and must never be announced.
+  useEffect(() => {
+    if (!onlineConnected) setRescueNotice(null)
+    else if (rescue.announcement !== null) setRescueNotice(rescue.announcement)
+  }, [onlineConnected, rescue.announcement])
 
   useEffect(() => {
     if ((gameMode === 'local' ? !started : !onlineConnected) || sceneReady || sceneError) return
@@ -1043,6 +1190,7 @@ export default function HellbreakGame() {
           <li><kbd>SPACE</kbd> 점프</li>
           <li><kbd>SHIFT</kbd> 달리기</li>
           {gameMode === 'local' && <li><kbd>F</kbd> 획득한 능력 사용</li>}
+          {gameMode === 'online' && <li><kbd>E</kbd> 길게 눌러 추락한 팀원 구조</li>}
           <li><kbd>DRAG</kbd> 시점 회전 · 휠 거리 조절</li>
           {gameMode === 'local' && <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>}
         </ul>
@@ -1088,6 +1236,7 @@ export default function HellbreakGame() {
               ownPlayerId={network.ownPlayerId}
               controls={controls}
               active={sceneReady && onlineHud.canMove}
+              rescueLinks={rescue.links}
               sendInput={network.sendInput}
               onReady={() => {
                 setSceneReady(true)
@@ -1155,10 +1304,18 @@ export default function HellbreakGame() {
           </div>
         )}
         {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && (
-          <MobileControls controls={controls} heldAbility={gameMode === 'local' ? heldAbility : null} />
+          <MobileControls
+            controls={controls}
+            heldAbility={gameMode === 'local' ? heldAbility : null}
+            rescueEnabled={onlineConnected}
+          />
+        )}
+        {onlineConnected && sceneReady && onlineHud.canMove && (
+          <RescueOverlay rescue={rescue} notice={rescueNotice} />
         )}
         {gameMode === 'online' && network.status === 'connected' && (
-          <div className="network-position-debug" aria-live="polite">
+          // Pose and grip move 20 times a second, so this readout is never a live region.
+          <div className="network-position-debug">
             {network.players.map((player) => (
               <span
                 key={player.id}
@@ -1169,6 +1326,10 @@ export default function HellbreakGame() {
                 data-grounded={String(player.grounded)}
                 data-y={player.y.toFixed(2)}
                 data-jump-ack={String(player.lastAcknowledgedJump)}
+                data-grab-target={player.grabTargetId}
+                data-grabbed-by={player.grabbedById}
+                data-grip={player.grip.toFixed(2)}
+                data-grab-ack={String(player.lastAcknowledgedGrab)}
               >
                 {player.id === network.ownPlayerId ? '나' : player.id.slice(0, 4)}
                 {' · '}

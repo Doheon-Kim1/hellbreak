@@ -174,4 +174,113 @@ describe('Colyseus HELLBREAK room', () => {
     expect(roomA.state.matchPhase).toBe('running')
     expect(roomA.state.elapsed).toBeGreaterThan(0.3)
   })
+
+  it('creates a rescue link from a held grab alone and clears it on release and disconnect', async () => {
+    const running = await createHellbreakServer({ port: 0, hostname: '127.0.0.1' })
+    shutdown = running.shutdown
+    const address = running.httpServer.address() as { port: number }
+    const endpoint = `ws://127.0.0.1:${address.port}`
+
+    // Spawn slot 0 rescues slot 1, so the rescuer looks along +x toward the jumper.
+    const roomA = await new Client(endpoint).create<HellbreakRoomState>('hellbreak')
+    rooms.push(roomA)
+    const roomB = await new Client(endpoint).joinById<HellbreakRoomState>(roomA.roomId)
+    rooms.push(roomB)
+    const roomC = await new Client(endpoint).joinById<HellbreakRoomState>(roomA.roomId)
+    rooms.push(roomC)
+    await waitFor(() => [roomA, roomB, roomC].every((room) => room.state.players.size === 3))
+
+    const rescuerId = roomA.sessionId
+    const jumperId = roomB.sessionId
+    const idlerId = roomC.sessionId
+    const seenBy = (room: typeof roomA, playerId: string) => room.state.players.get(playerId)!
+
+    expect(seenBy(roomA, rescuerId).grabTargetId).toBe('')
+    expect(seenBy(roomA, rescuerId).grabbedById).toBe('')
+    expect(seenBy(roomA, rescuerId).grip).toBe(1)
+    expect(seenBy(roomA, rescuerId).lastAcknowledgedGrab).toBe(0)
+
+    // Held intent persists server-side, so one message is a held E until the client says otherwise.
+    // The payload carries no target id, coordinates, force, or grip.
+    roomA.send('input', {
+      sequence: 1,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: true,
+      cameraYaw: -Math.PI / 2,
+    })
+    roomB.send('input', {
+      sequence: 1,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: true,
+      grab: false,
+      cameraYaw: 0,
+    })
+
+    await waitFor(() => seenBy(roomA, rescuerId).lastAcknowledgedGrab > 0, 5_000)
+    const acknowledged = seenBy(roomA, rescuerId).lastAcknowledgedGrab
+    expect(seenBy(roomA, rescuerId).grabTargetId).toBe(jumperId)
+
+    // Every client receives the same authoritative link, grip, and receipt.
+    await waitFor(() => seenBy(roomC, rescuerId).lastAcknowledgedGrab === acknowledged, 5_000)
+    expect(seenBy(roomB, rescuerId).grabTargetId).toBe(jumperId)
+    expect(seenBy(roomC, rescuerId).grabTargetId).toBe(jumperId)
+    expect(seenBy(roomB, jumperId).grabbedById).toBe(rescuerId)
+    expect(seenBy(roomC, jumperId).grabbedById).toBe(rescuerId)
+    expect(seenBy(roomB, rescuerId).grip).toBeLessThan(1)
+    expect(seenBy(roomB, rescuerId).grip).toBeGreaterThan(0)
+    // The idler never asked for anything and is never selected.
+    expect(seenBy(roomA, idlerId).grabbedById).toBe('')
+    expect(seenBy(roomA, idlerId).lastAcknowledgedGrab).toBe(0)
+
+    // A smuggled target, grip, and receipt are all ignored by the authoritative room.
+    roomA.send('input', {
+      sequence: 2,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: true,
+      cameraYaw: -Math.PI / 2,
+      grabTargetId: idlerId,
+      grabbedById: idlerId,
+      grip: 99,
+      lastAcknowledgedGrab: 999,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect(seenBy(roomA, idlerId).grabbedById).toBe('')
+    expect(seenBy(roomA, rescuerId).grip).toBeLessThanOrEqual(1)
+    expect(seenBy(roomA, rescuerId).lastAcknowledgedGrab).toBe(acknowledged)
+
+    // Releasing E clears both sides for every observer.
+    roomA.send('input', {
+      sequence: 3,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: false,
+      cameraYaw: -Math.PI / 2,
+    })
+    await waitFor(() => seenBy(roomA, rescuerId).grabTargetId === '', 5_000)
+    await waitFor(() => seenBy(roomC, jumperId).grabbedById === '', 5_000)
+    expect(seenBy(roomA, rescuerId).lastAcknowledgedGrab).toBe(acknowledged)
+
+    await roomB.leave()
+    rooms.splice(rooms.indexOf(roomB), 1)
+    await waitFor(() => roomA.state.players.size === 2)
+    expect(seenBy(roomA, rescuerId).grabTargetId).toBe('')
+  })
 })

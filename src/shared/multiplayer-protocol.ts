@@ -14,6 +14,11 @@ export interface MultiplayerInputCommand {
   right: boolean
   sprint: boolean
   jump: boolean
+  /**
+   * Held rescue intent only. The client says "I am holding E" and nothing else: the target player,
+   * pull direction, force, grip, and completion are all chosen by the authoritative room.
+   */
+  grab: boolean
   cameraYaw: number
 }
 
@@ -29,6 +34,14 @@ export interface NetworkPlayerSnapshot {
   lastProcessedInput: number
   /** Sequence of the last jump the server applied as a grounded takeoff; 0 before any takeoff. */
   lastAcknowledgedJump: number
+  /** Player this runner is pulling up; empty when not rescuing. */
+  grabTargetId: string
+  /** Player pulling this runner up; empty when not being rescued. */
+  grabbedById: string
+  /** Normalized 0..1 rescue grip. */
+  grip: number
+  /** Sequence of the last input the server turned into a rescue link; 0 before any link. */
+  lastAcknowledgedGrab: number
 }
 
 export interface NetworkMatchSnapshot {

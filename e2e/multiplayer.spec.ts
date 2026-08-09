@@ -1,5 +1,8 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { Client } from '@colyseus/sdk'
+import type { HellbreakRoomState } from '../src/server/hellbreak-state'
+import { HELLBREAK_ROOM_NAME } from '../src/shared/multiplayer-protocol'
 
 const SCENE_TIMEOUT_MS = 20_000
 const INPUT_OBSERVATION_MS = 8_000
@@ -169,5 +172,155 @@ test('one shared room drives server jump physics and the match HUD in both brows
   } finally {
     await contextA.close()
     await contextB.close()
+  }
+})
+
+test('browser rescue input creates one server-owned lifeline to a real room client', async ({ browser }) => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  const room = await new Client('http://127.0.0.1:2567')
+    .create<HellbreakRoomState>(HELLBREAK_ROOM_NAME)
+
+  try {
+    await openOnlineTab(page)
+    await page.getByLabel('룸 ID').fill(room.roomId)
+    await page.getByRole('button', { name: '참가', exact: true }).click()
+    await expect(page.getByTestId('player-count')).toContainText('참가자 2/6')
+    await expect(page.getByTestId('network-player')).toHaveCount(2)
+    await waitForOnlineScene(page)
+
+    const rescuer = page.locator('[data-testid="network-player"][data-own="true"]')
+    const jumperId = room.sessionId
+    const rescuerId = (await rescuer.getAttribute('data-player-id')) ?? ''
+    expect(rescuerId).not.toBe('')
+    expect(jumperId).not.toBe(rescuerId)
+    const jumper = page.locator(`[data-testid="network-player"][data-player-id="${jumperId}"]`)
+    const initialGrabAck = Number(await rescuer.getAttribute('data-grab-ack'))
+    expect(initialGrabAck).toBe(0)
+    await expect(rescuer).toHaveAttribute('data-grounded', 'true')
+    await expect(jumper).toHaveAttribute('data-grounded', 'true')
+
+    // The browser sends only held rescue. The second client sends only a normal jump edge; neither can
+    // name a rescue target or submit a pose, force, or grip value.
+    // Walk the SDK player into the browser's default -X/-Z camera cone using ordinary server input.
+    room.send('input', {
+      sequence: 1,
+      forward: true,
+      backward: false,
+      left: false,
+      right: true,
+      sprint: false,
+      jump: false,
+      grab: false,
+      cameraYaw: 0,
+    })
+    await expect.poll(() => room.state.players.get(jumperId)?.x ?? -26, {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [25],
+    }).toBeGreaterThan(-25.6)
+    room.send('input', {
+      sequence: 2,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: false,
+      cameraYaw: 0,
+    })
+    await expect.poll(() => room.state.players.get(jumperId)?.lastProcessedInput ?? 0, {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [25],
+    }).toBe(2)
+    const rescueStartX = room.state.players.get(jumperId)?.x ?? -26
+    await page.keyboard.down('e')
+    try {
+      await page.waitForTimeout(250)
+      const schemaLink = { target: jumperId, incoming: rescuerId }
+      let schemaObserved = false
+      let domTargetObserved = false
+      let domIncomingObserved = false
+      let jumpSequence = 3
+      for (let attempt = 0; attempt < 4 && (!schemaObserved || !domTargetObserved || !domIncomingObserved); attempt += 1) {
+        room.send('input', {
+          sequence: jumpSequence,
+          forward: false,
+          backward: false,
+          left: false,
+          right: false,
+          sprint: false,
+          jump: true,
+          grab: false,
+          cameraYaw: 0,
+        })
+        await expect.poll(() => room.state.players.get(jumperId)?.lastAcknowledgedJump ?? 0, {
+          timeout: INPUT_OBSERVATION_MS,
+          intervals: [50],
+        }).toBe(jumpSequence)
+        room.send('input', {
+          sequence: jumpSequence + 1,
+          forward: false,
+          backward: false,
+          left: false,
+          right: false,
+          sprint: false,
+          jump: false,
+          grab: false,
+          cameraYaw: 0,
+        })
+        const checks: PromiseSettledResult<void>[] = await Promise.allSettled([
+          schemaObserved ? Promise.resolve() : expect.poll(() => ({
+            target: room.state.players.get(rescuerId)?.grabTargetId ?? '',
+            incoming: room.state.players.get(jumperId)?.grabbedById ?? '',
+          }), { timeout: 1_200, intervals: [25] }).toEqual(schemaLink),
+          domTargetObserved ? Promise.resolve() : expect.poll(
+            () => rescuer.getAttribute('data-grab-target'),
+            { timeout: 1_200, intervals: [25] },
+          ).toBe(jumperId),
+          domIncomingObserved ? Promise.resolve() : expect.poll(
+            () => jumper.getAttribute('data-grabbed-by'),
+            { timeout: 1_200, intervals: [25] },
+          ).toBe(rescuerId),
+        ])
+        schemaObserved ||= checks[0].status === 'fulfilled'
+        domTargetObserved ||= checks[1].status === 'fulfilled'
+        domIncomingObserved ||= checks[2].status === 'fulfilled'
+        if (!schemaObserved || !domTargetObserved || !domIncomingObserved) {
+          await expect.poll(() => room.state.players.get(jumperId)?.grounded ?? false, {
+            timeout: INPUT_OBSERVATION_MS,
+            intervals: [50],
+          }).toBe(true)
+          jumpSequence += 2
+        }
+      }
+      expect(schemaObserved).toBe(true)
+      expect(domTargetObserved).toBe(true)
+      expect(domIncomingObserved).toBe(true)
+      const acknowledgedGrab = Number(await rescuer.getAttribute('data-grab-ack'))
+      expect(acknowledgedGrab).toBeGreaterThan(initialGrabAck)
+      await expect.poll(() => room.state.players.get(rescuerId)?.lastAcknowledgedGrab ?? 0, {
+        timeout: INPUT_OBSERVATION_MS,
+      }).toBe(acknowledgedGrab)
+      await expect.poll(async () => Number(await rescuer.getAttribute('data-grip'))).toBeLessThan(1)
+      // The target started to the rescuer's left; the room-owned pull must move it toward +X.
+      expect(room.state.players.get(jumperId)?.x ?? rescueStartX).toBeGreaterThan(rescueStartX + 0.02)
+    } finally {
+      await page.keyboard.up('e')
+    }
+
+    await expect(rescuer).toHaveAttribute('data-grab-target', '', { timeout: INPUT_OBSERVATION_MS })
+    await expect(jumper).toHaveAttribute('data-grabbed-by', '')
+    await expect.poll(() => room.state.players.get(rescuerId)?.grabTargetId ?? 'missing', {
+      timeout: INPUT_OBSERVATION_MS,
+    }).toBe('')
+    await expect(jumper).toHaveAttribute('data-grounded', 'true', { timeout: INPUT_OBSERVATION_MS })
+    expect(pageErrors).toEqual([])
+  } finally {
+    await page.keyboard.up('e').catch(() => undefined)
+    await room.leave(true).catch(() => undefined)
+    await context.close()
   }
 })

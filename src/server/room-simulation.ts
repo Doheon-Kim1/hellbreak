@@ -18,6 +18,8 @@ export interface PlayerInputCommand {
   right?: boolean
   sprint?: boolean
   jump?: boolean
+  /** Held rescue intent. The client may only say "I am holding E", never who it wants to pull. */
+  grab?: boolean
   cameraYaw?: number
 }
 
@@ -37,6 +39,21 @@ export interface RoomPlayerState {
    * leaves it untouched, so an increase is proof that one real jump started.
    */
   lastAcknowledgedJump: number
+  /** Player this runner is currently pulling up; empty when not rescuing. */
+  grabTargetId: string
+  /** Derived every tick from the outgoing links, never accepted from a client. */
+  grabbedById: string
+  /** Server-private feet height of the target when the link was created, for landing gain. */
+  grabStartFeetY: number
+  /** Normalized 0..1 rescue grip. */
+  grip: number
+  /** Server-private room time before which this runner may not start another rescue. */
+  grabCooldownUntil: number
+  /**
+   * Server-owned receipt: the sequence of the input the room actually turned into a rescue link.
+   * Held intent that reacquires nothing, and every client-supplied value, leaves it untouched.
+   */
+  lastAcknowledgedGrab: number
   spawnSlot: number
   lastSequence: number
   input: PlayerInputCommand
@@ -65,6 +82,10 @@ export interface PublicRoomPlayerSnapshot {
   escaped: boolean
   lastProcessedInput: number
   lastAcknowledgedJump: number
+  grabTargetId: string
+  grabbedById: string
+  grip: number
+  lastAcknowledgedGrab: number
 }
 
 export interface PublicRoomSnapshot {
@@ -90,6 +111,37 @@ const MAX_ID_LENGTH = 128
 const DEFAULT_MATCH_SECONDS = 180
 const LAVA_LETHAL_MARGIN = 0.35
 const LANDING_EPSILON = 0.01
+
+/** Three-dimensional reach a rescuer may start a link within. */
+const RESCUE_REACH = 2.4
+/** Three-dimensional distance that snaps an established link. */
+const RESCUE_BREAK_RANGE = 3.2
+/** A grounded teammate must be at least this far below the rescuer to be worth pulling. */
+const RESCUE_MIN_DROP = 0.3
+/** Broad 150° forward cone derived from the server-validated camera yaw. */
+const RESCUE_CONE_COS = Math.cos((75 * Math.PI) / 180)
+/** Horizontal speed the target is reeled in at, and the counter-drag the rescuer suffers. */
+const RESCUE_PULL_SPEED = 3.2
+const RESCUE_DRAG_SPEED = 0.9
+const RESCUE_LIFT_ACCEL = 26
+const RESCUE_MAX_LIFT_SPEED = 5.5
+/** Fraction of ordinary walking speed a rescuer keeps while a link is held. */
+const RESCUE_SPEED_SCALE = 0.55
+/** Hard per-tick displacement cap, so no force combination can teleport a runner. */
+const MAX_RESCUE_STEP = 0.5
+/** Downward probe used to re-resolve support after a rescue nudge moved a runner sideways. */
+const RESCUE_SUPPORT_PROBE = 0.02
+/** A target this close above the authoritative lava surface makes the rescue desperate. */
+const RESCUE_PANIC_HEIGHT = 1.5
+const RESCUE_PANIC_FORCE = 1.25
+const RESCUE_PANIC_DRAG = 1.5
+const RESCUE_PANIC_DRAIN = 1.5
+const GRIP_DRAIN_PER_SECOND = 0.34
+const GRIP_REGEN_PER_SECOND = 0.22
+const RESCUE_RELEASE_COOLDOWN = 1
+const RESCUE_EXHAUSTION_COOLDOWN = 1.5
+/** Height the target must gain over its link-start feet for the landing to count as a rescue. */
+const RESCUE_LANDING_GAIN = 0.3
 
 /** Half the rendered capsule height, so `y` is the avatar centre and `y - half` its feet. */
 export const PLAYER_HALF_HEIGHT = 0.72
@@ -167,6 +219,12 @@ function spawnedPlayer(spawnSlot: number, previous?: RoomPlayerState): RoomPlaye
     queuedJumpSequence: 0,
     // A spawn or restart clears the receipt even though input sequences keep counting up.
     lastAcknowledgedJump: 0,
+    grabTargetId: '',
+    grabbedById: '',
+    grabStartFeetY: 0,
+    grip: 1,
+    grabCooldownUntil: 0,
+    lastAcknowledgedGrab: 0,
     spawnSlot,
     lastSequence: previous?.lastSequence ?? 0,
     input: { sequence: previous?.lastSequence ?? 0, cameraYaw: 0 },
@@ -212,10 +270,29 @@ export function joinRoom(
 export function leaveRoom(room: AuthoritativeRoomState, authenticatedSessionId: string): AuthoritativeRoomState {
   if (!Object.hasOwn(room.sessions, authenticatedSessionId)) return room
   const playerId = room.sessions[authenticatedSessionId]
+  const remaining = withoutKey(room.players, playerId)
 
   return {
     ...room,
-    players: withoutKey(room.players, playerId),
+    // A disconnect clears both sides of its link immediately instead of leaving a dangling id.
+    players: Object.fromEntries(Object.entries(remaining).map(([id, player]) => {
+      const heldTarget = player.grabTargetId === playerId
+      const heldBy = player.grabbedById === playerId
+      if (!heldTarget && !heldBy) return [id, player] as const
+
+      return [id, {
+        ...player,
+        grabTargetId: heldTarget ? '' : player.grabTargetId,
+        grabbedById: heldBy ? '' : player.grabbedById,
+        grabStartFeetY: heldTarget ? 0 : player.grabStartFeetY,
+        // Losing a target mid-haul is a failed rescue, so the holder waits out the ordinary
+        // reacquire cooldown instead of dropping straight onto the next teammate in reach.
+        // Losing a rescuer costs the target nothing: it was never holding anyone.
+        grabCooldownUntil: heldTarget
+          ? Math.max(player.grabCooldownUntil, room.elapsed + RESCUE_RELEASE_COOLDOWN)
+          : player.grabCooldownUntil,
+      }] as const
+    })),
     sessions: withoutKey(room.sessions, authenticatedSessionId),
   }
 }
@@ -230,7 +307,15 @@ export function applyPlayerInput(
   if (!Object.hasOwn(room.players, playerId)) return room
 
   const player = room.players[playerId]
-  const controls = [input.forward, input.backward, input.left, input.right, input.sprint, input.jump]
+  const controls = [
+    input.forward,
+    input.backward,
+    input.left,
+    input.right,
+    input.sprint,
+    input.jump,
+    input.grab,
+  ]
   if (
     !Number.isSafeInteger(input.sequence)
     || input.sequence <= player.lastSequence
@@ -246,6 +331,7 @@ export function applyPlayerInput(
     right: input.right ?? false,
     sprint: input.sprint ?? false,
     jump: input.jump ?? false,
+    grab: input.grab ?? false,
     cameraYaw: normalizeYaw(input.cameraYaw ?? 0),
   }
 
@@ -273,7 +359,9 @@ function clampToWorld(value: number): number {
 }
 
 function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState {
-  const speed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
+  const baseSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
+  // Holding a teammate costs footing, so a rescuer walks slower until the link ends.
+  const speed = player.grabTargetId === '' ? baseSpeed : baseSpeed * RESCUE_SPEED_SCALE
   const localVelocity = movementVelocity(player.input, speed)
   const velocity = rotateMovementByCamera(localVelocity, player.input.cameraYaw ?? 0)
   const x = clampToWorld(player.x + velocity.x * delta)
@@ -303,6 +391,235 @@ function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState 
   }
 }
 
+function rescueDistance(rescuer: RoomPlayerState, target: RoomPlayerState): number {
+  return Math.hypot(target.x - rescuer.x, target.y - rescuer.y, target.z - rescuer.z)
+}
+
+/** True while the teammate sits inside the broad forward cone of the validated camera yaw. */
+function insideRescueCone(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
+  const dx = target.x - rescuer.x
+  const dz = target.z - rescuer.z
+  const horizontal = Math.hypot(dx, dz)
+  // Someone hanging straight overhead or underfoot has no yaw to compare against.
+  if (horizontal < 1e-6) return true
+  const forward = rotateMovementByCamera({ x: 0, z: -1 }, rescuer.input.cameraYaw ?? 0)
+  return (dx * forward.x + dz * forward.z) / horizontal >= RESCUE_CONE_COS
+}
+
+function canHoldRescue(rescuer: RoomPlayerState): boolean {
+  return rescuer.alive
+    && !rescuer.escaped
+    && rescuer.grounded
+    && rescuer.input.grab === true
+    && rescuer.grip > 0
+}
+
+/** An established link survives while the rescuer holds on and the falling teammate is still airborne. */
+function linkSurvives(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
+  return canHoldRescue(rescuer)
+    && target.alive
+    && !target.escaped
+    && !target.grounded
+    && rescueDistance(rescuer, target) <= RESCUE_BREAK_RANGE
+}
+
+function isRescueCandidate(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
+  return target.alive
+    && !target.escaped
+    && (!target.grounded || target.y <= rescuer.y - RESCUE_MIN_DROP)
+    && rescueDistance(rescuer, target) <= RESCUE_REACH
+    && insideRescueCone(rescuer, target)
+}
+
+interface RescueRequest {
+  rescuerId: string
+  targetId: string
+  distance: number
+}
+
+/**
+ * Resolves every outgoing link for the tick. Requests are sorted before assignment so object
+ * iteration order can never decide a contested target, and a player may hold at most one
+ * outgoing and one incoming link, which rules out chains and cycles.
+ */
+function resolveRescueLinks(
+  players: Record<string, RoomPlayerState>,
+  elapsed: number,
+): { links: Map<string, string>; created: Set<string> } {
+  const links = new Map<string, string>()
+  const rescuers = new Set<string>()
+  const targets = new Set<string>()
+
+  // A link that ends this tick also blocks its rescuer from hopping straight onto someone else.
+  const cooling = new Set<string>()
+  const ids = Object.keys(players).sort()
+  for (const id of ids) {
+    const player = players[id]
+    if (player.grabTargetId === '') continue
+    const target = players[player.grabTargetId]
+    if (!target || !linkSurvives(player, target)) {
+      cooling.add(id)
+      continue
+    }
+    links.set(id, player.grabTargetId)
+    rescuers.add(id)
+    targets.add(player.grabTargetId)
+  }
+
+  const requests: RescueRequest[] = []
+  for (const rescuerId of ids) {
+    const rescuer = players[rescuerId]
+    if (
+      rescuers.has(rescuerId)
+      || cooling.has(rescuerId)
+      || !canHoldRescue(rescuer)
+      || elapsed < rescuer.grabCooldownUntil
+    ) continue
+    for (const targetId of ids) {
+      if (targetId === rescuerId || !isRescueCandidate(rescuer, players[targetId])) continue
+      requests.push({ rescuerId, targetId, distance: rescueDistance(rescuer, players[targetId]) })
+    }
+  }
+  requests.sort((left, right) => left.distance - right.distance
+    || left.rescuerId.localeCompare(right.rescuerId)
+    || left.targetId.localeCompare(right.targetId))
+
+  const created = new Set<string>()
+  for (const request of requests) {
+    const busy = (id: string) => rescuers.has(id) || targets.has(id)
+    if (busy(request.rescuerId) || busy(request.targetId)) continue
+    links.set(request.rescuerId, request.targetId)
+    rescuers.add(request.rescuerId)
+    targets.add(request.targetId)
+    created.add(request.rescuerId)
+  }
+
+  return { links, created }
+}
+
+/** Re-resolves downward support after a rescue nudge changed a runner's column. */
+function resettleAfterRescue(player: RoomPlayerState): RoomPlayerState {
+  if (player.velocityY > 0) return { ...player, grounded: false }
+  const feet = player.y - PLAYER_HALF_HEIGHT
+  const support = supportTopBelow(player.x, player.z, feet, feet - RESCUE_SUPPORT_PROBE)
+  return support === null
+    ? { ...player, grounded: false }
+    : { ...player, y: support + PLAYER_HALF_HEIGHT, velocityY: 0, grounded: true }
+}
+
+/** Rescuers whose target hangs inside the lava panic band above the authoritative surface. */
+function panickingRescuers(
+  players: Record<string, RoomPlayerState>,
+  links: ReadonlyMap<string, string>,
+  lavaHeight: number,
+): Set<string> {
+  const panicking = new Set<string>()
+  for (const [rescuerId, targetId] of links) {
+    if (players[targetId].y - lavaHeight < RESCUE_PANIC_HEIGHT) panicking.add(rescuerId)
+  }
+  return panicking
+}
+
+/**
+ * Applies one rescue force per target and one counter-drag per rescuer. Every displacement is
+ * capped and split so the pair can close the gap but never swap sides or teleport.
+ */
+function applyRescueForces(
+  players: Record<string, RoomPlayerState>,
+  links: ReadonlyMap<string, string>,
+  panicking: ReadonlySet<string>,
+  delta: number,
+): void {
+  for (const [rescuerId, targetId] of links) {
+    const rescuer = players[rescuerId]
+    const target = players[targetId]
+    const panic = panicking.has(rescuerId)
+    const dx = rescuer.x - target.x
+    const dz = rescuer.z - target.z
+    const horizontal = Math.hypot(dx, dz)
+    const unitX = horizontal < 1e-6 ? 0 : dx / horizontal
+    const unitZ = horizontal < 1e-6 ? 0 : dz / horizontal
+    const force = panic ? RESCUE_PANIC_FORCE : 1
+    const pull = Math.min(MAX_RESCUE_STEP, RESCUE_PULL_SPEED * force * delta, horizontal / 2)
+    const drag = Math.min(
+      MAX_RESCUE_STEP,
+      RESCUE_DRAG_SPEED * (panic ? RESCUE_PANIC_DRAG : 1) * delta,
+      horizontal / 2,
+    )
+
+    // A haul has a destination: the rescuer's own footing. Below it the teammate is lifted hard
+    // against gravity; once they clear it the lift simply stops, so they arc down onto the ledge
+    // instead of hovering under the lip or being launched out of rescue range.
+    const hauling = target.y < rescuer.y
+    players[targetId] = resettleAfterRescue({
+      ...target,
+      x: clampToWorld(target.x + unitX * pull),
+      z: clampToWorld(target.z + unitZ * pull),
+      velocityY: hauling
+        ? Math.min(RESCUE_MAX_LIFT_SPEED, target.velocityY + RESCUE_LIFT_ACCEL * force * delta)
+        : target.velocityY,
+    })
+    players[rescuerId] = resettleAfterRescue({
+      ...rescuer,
+      x: clampToWorld(rescuer.x - unitX * drag),
+      z: clampToWorld(rescuer.z - unitZ * drag),
+    })
+  }
+}
+
+/**
+ * Writes the resolved links back onto the published players. Both sides are cleared when either
+ * runner dies, escapes, or the match finishes, and the incoming side is derived here rather than
+ * ever being accepted from a client.
+ */
+function commitRescueLinks(
+  players: Record<string, RoomPlayerState>,
+  links: Map<string, string>,
+  created: Set<string>,
+  exhausted: ReadonlySet<string>,
+  elapsed: number,
+  phase: MatchPhase,
+): Record<string, RoomPlayerState> {
+  const active = phase === 'finished' ? new Map<string, string>() : new Map(links)
+  for (const [rescuerId, targetId] of active) {
+    const rescuer = players[rescuerId]
+    const target = players[targetId]
+    if (!rescuer?.alive || rescuer.escaped || !target?.alive || target.escaped) active.delete(rescuerId)
+  }
+
+  const grabbedBy = new Map<string, string>()
+  for (const [rescuerId, targetId] of active) grabbedBy.set(targetId, rescuerId)
+
+  return Object.fromEntries(Object.entries(players).map(([id, player]) => {
+    const targetId = active.get(id) ?? ''
+    const startedNow = targetId !== '' && created.has(id)
+    // A counter-drag can remove the rescuer's footing in the same tick that the room accepted the
+    // link. Keep the real receipt and failure cooldown even though no public link survives.
+    const createdThenBroken = targetId === '' && created.has(id)
+    const previous = player.grabTargetId === '' ? null : players[player.grabTargetId] ?? null
+    const ended = player.grabTargetId !== '' && targetId !== player.grabTargetId
+    // A rescue counts as completed when the target lands measurably above its link-start feet.
+    const completed = ended
+      && Boolean(previous?.grounded)
+      && (previous as RoomPlayerState).y - PLAYER_HALF_HEIGHT >= player.grabStartFeetY + RESCUE_LANDING_GAIN
+
+    return [id, {
+      ...player,
+      grabTargetId: targetId,
+      grabbedById: grabbedBy.get(id) ?? '',
+      grabStartFeetY: startedNow
+        ? players[targetId].y - PLAYER_HALF_HEIGHT
+        : targetId === '' ? 0 : player.grabStartFeetY,
+      lastAcknowledgedGrab: startedNow || createdThenBroken ? player.lastSequence : player.lastAcknowledgedGrab,
+      grabCooldownUntil: exhausted.has(id)
+        ? elapsed + RESCUE_EXHAUSTION_COOLDOWN
+        : (ended || createdThenBroken) && !completed
+            ? elapsed + RESCUE_RELEASE_COOLDOWN
+            : player.grabCooldownUntil,
+    }] as const
+  }))
+}
+
 function drownedInLava(player: RoomPlayerState, lavaHeight: number): boolean {
   return player.y < lavaHeight + LAVA_LETHAL_MARGIN
 }
@@ -320,18 +637,61 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
   const lava = lavaStateAt(elapsed, room.durationSeconds)
   const atDeadline = elapsed >= room.durationSeconds
 
-  let eliminations = room.eliminations
-  const players = Object.fromEntries(Object.entries(room.players).map(([id, player]) => {
+  // 1-2. Ordinary movement first, so rescue forces act on already-advanced poses.
+  const advanced = emptyRecord<RoomPlayerState>()
+  for (const [id, player] of Object.entries(room.players)) {
     // Eliminated and escaped runners no longer consume movement or jump intent.
-    if (!player.alive || player.escaped) return [id, { ...player, queuedJumpSequence: 0 }] as const
+    advanced[id] = !player.alive || player.escaped
+      ? { ...player, queuedJumpSequence: 0 }
+      : advancePlayer(player, delta)
+  }
 
-    const moved = advancePlayer(player, delta)
+  // 3-5. Break invalidated links, then resolve new ones deterministically.
+  const { links, created } = resolveRescueLinks(advanced, elapsed)
+
+  // 6-7. One rescue force per target and one counter-drag per rescuer, then re-resolve support.
+  const panicking = panickingRescuers(advanced, links, lava.height)
+  applyRescueForces(advanced, links, panicking, delta)
+
+  // 9. End a link in the same tick when its target lands or counter-drag costs the rescuer their
+  // footing. A standing teammate cannot be dragged, and an airborne rescuer cannot hold anyone.
+  for (const [rescuerId, targetId] of links) {
+    if (!advanced[rescuerId].grounded || advanced[targetId].grounded) links.delete(rescuerId)
+  }
+
+  // 8. Grip drains while linked and only regenerates on solid ground without a link.
+  const exhausted = new Set<string>()
+  for (const [id, player] of Object.entries(advanced)) {
+    const linked = links.has(id)
+    const drain = GRIP_DRAIN_PER_SECOND * (panicking.has(id) ? RESCUE_PANIC_DRAIN : 1)
+    const grip = linked
+      ? player.grip - drain * delta
+      : player.grounded ? player.grip + GRIP_REGEN_PER_SECOND * delta : player.grip
+    advanced[id] = { ...player, grip: Math.min(1, Math.max(0, grip)) }
+    // Exhausted grip drops the link inside the same tick that emptied it.
+    if (linked && advanced[id].grip <= 0) {
+      links.delete(id)
+      exhausted.add(id)
+    }
+  }
+
+  let eliminations = room.eliminations
+  const players = Object.fromEntries(Object.entries(advanced).map(([id, moved]) => {
+    const player = room.players[id]
+    if (!player.alive || player.escaped) return [id, moved] as const
+
     // On the deadline tick the lava tops out over the exit, so a completed escape resolves first.
     if (atDeadline && reachedExit(moved)) return [id, { ...moved, escaped: true }] as const
 
     if (drownedInLava(moved, lava.height)) {
       eliminations += 1
-      return [id, { ...player, alive: false, velocityY: 0, queuedJumpSequence: 0 }] as const
+      return [id, {
+        ...player,
+        alive: false,
+        velocityY: 0,
+        queuedJumpSequence: 0,
+        grip: moved.grip,
+      }] as const
     }
 
     return [id, reachedExit(moved) ? { ...moved, escaped: true } : moved] as const
@@ -354,7 +714,7 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
     phase,
     winner,
     eliminations,
-    players,
+    players: commitRescueLinks(players, links, created, exhausted, elapsed, phase),
   }
 }
 
@@ -378,6 +738,10 @@ export function publicRoomSnapshot(room: AuthoritativeRoomState): PublicRoomSnap
       escaped: player.escaped,
       lastProcessedInput: player.lastSequence,
       lastAcknowledgedJump: player.lastAcknowledgedJump,
+      grabTargetId: player.grabTargetId,
+      grabbedById: player.grabbedById,
+      grip: player.grip,
+      lastAcknowledgedGrab: player.lastAcknowledgedGrab,
     }])),
   }
 }
