@@ -243,8 +243,13 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       let schemaObserved = false
       let domTargetObserved = false
       let domIncomingObserved = false
+      let readoutObserved = false
       let jumpSequence = 3
-      for (let attempt = 0; attempt < 4 && (!schemaObserved || !domTargetObserved || !domIncomingObserved); attempt += 1) {
+      for (
+        let attempt = 0;
+        attempt < 4 && (!schemaObserved || !domTargetObserved || !domIncomingObserved || !readoutObserved);
+        attempt += 1
+      ) {
         room.send('input', {
           sequence: jumpSequence,
           forward: false,
@@ -284,11 +289,21 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
             () => jumper.getAttribute('data-grabbed-by'),
             { timeout: 1_200, intervals: [25] },
           ).toBe(rescuerId),
+          // The player-facing readout has to say the same thing the schema does: holding a
+          // teammate, with a banded grip meter on screen rather than a bare number. Which band it
+          // lands in depends on how much grip earlier attempts burned, so any band counts.
+          readoutObserved ? Promise.resolve() : expect.poll(async () => ({
+            state: await page.getByTestId('rescue-status').getAttribute('data-state'),
+            banded: ['steady', 'warning', 'danger'].includes(
+              (await page.getByTestId('rescue-grip').getAttribute('data-grip-band')) ?? '',
+            ),
+          }), { timeout: 1_200, intervals: [25] }).toEqual({ state: 'holding', banded: true }),
         ])
         schemaObserved ||= checks[0].status === 'fulfilled'
         domTargetObserved ||= checks[1].status === 'fulfilled'
         domIncomingObserved ||= checks[2].status === 'fulfilled'
-        if (!schemaObserved || !domTargetObserved || !domIncomingObserved) {
+        readoutObserved ||= checks[3].status === 'fulfilled'
+        if (!schemaObserved || !domTargetObserved || !domIncomingObserved || !readoutObserved) {
           await expect.poll(() => room.state.players.get(jumperId)?.grounded ?? false, {
             timeout: INPUT_OBSERVATION_MS,
             intervals: [50],
@@ -299,6 +314,10 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       expect(schemaObserved).toBe(true)
       expect(domTargetObserved).toBe(true)
       expect(domIncomingObserved).toBe(true)
+      expect(readoutObserved).toBe(true)
+      // Milestones, and only milestones, reach the live region: never a per-frame grip value.
+      await expect(page.getByTestId('rescue-notice'))
+        .toHaveText(/구조 시작|구조 성공|구조 실패|그립 소진/)
       const acknowledgedGrab = Number(await rescuer.getAttribute('data-grab-ack'))
       expect(acknowledgedGrab).toBeGreaterThan(initialGrabAck)
       await expect.poll(() => room.state.players.get(rescuerId)?.lastAcknowledgedGrab ?? 0, {

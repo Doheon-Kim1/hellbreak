@@ -57,6 +57,58 @@ The online room implements one runner-to-runner rescue link without weakening th
 - a target near the authoritative lava surface receives a stronger panic pull while grip drain and rescuer drag also increase; rescue never grants lava immunity;
 - Colyseus publishes only presentation state (`grabTargetId`, `grabbedById`, normalized `grip`, and `lastAcknowledgedGrab`) for the rope, HUD, and stable test receipts.
 
+#### Rescue balance profile
+
+Every rescue number lives in `src/server/rescue-balance.ts` as one frozen, server-owned profile.
+It is imported by `room-simulation.ts` and by room-owned tests only: it is never runtime
+configuration, never negotiated with a client, and never bundled for the browser.
+
+The profile is tuned as a **costly save, not free travel**:
+
+| Knob | Value | Intent |
+| --- | --- | --- |
+| `speedScale` | 0.32 | A linked rescuer keeps under a third of walking speed. |
+| `pullSpeed` / `dragSpeed` | 3 / 1.35 | The counter-drag is a large share of the pull, so hauling threatens the rescuer's own footing. |
+| `liftAccel` / `maxLiftSpeed` | 26 / 5 | Vertical rescue power is unchanged, with a lower fling ceiling so a haul lands a teammate instead of launching them out of reach. |
+| `gripDrainPerSecond` | 0.5 | A full grip is worth about two seconds of holding. |
+| `gripRegenPerSecond` | 0.14 | Refilling that bar costs about seven seconds on solid ground. |
+| `releaseCooldown` / `exhaustionCooldown` | 1.4 / 3 | Every failed rescue locks out reacquisition; emptying the bar costs more than letting go in time. |
+| `panicPullMultiplier` | 1.15 | Panic shortens the "teammate is about to touch lava" window without reversing a lost position. |
+| `panicDragMultiplier` / `panicDrainMultiplier` | 1.7 / 2 | The panic band raises cost faster than reward: a desperate hold lasts about one second. |
+
+`reach` (2.4), `breakRange` (3.2), `minDrop` (0.3), `coneDegrees` (75), and `maxStep` (0.5) are
+unchanged, so the selection geometry and the per-tick teleport guard keep their existing proofs.
+`rescue-balance.test.ts` asserts the design rules rather than the literals: bounded per-tick
+displacement, drag/pull ratio, drain-versus-regen ordering, cooldown ordering, and a panic band
+that is clutch without being a free reset.
+
+#### Player-facing rescue readout
+
+`src/game/hud.ts` turns the published rescue state into one chip, one banded grip meter, and one
+live region:
+
+- states: `idle`, `ready`, `holding`, `held`, `cooldown`, `exhausted`;
+- grip bands: `steady`, `warning`, `danger`, with text and a pulse so urgency is never hue-only;
+- outcomes: `rescued`, `exhausted`, `lost`, each announced once as a milestone—grip, cooldown
+  countdowns, and coordinates never reach the ARIA live region;
+- the prompt hides itself during a cooldown or on an empty grip, because the room would refuse.
+
+The outcome set is deliberately narrow. The room publishes no reason for a link ending, and a
+range break, the teammate landing, the rescuer losing footing, a death, and a disconnect can all
+happen in the same tick, so a cause cannot be recovered from outside. Only two endings are
+provable from the snapshot: the teammate finished standing measurably above where the client saw
+them caught (`rescued`), and the published grip bar reached empty as the link disappeared, which
+is the room's own exhaustion rule and is unreachable any other way while a link is live
+(`exhausted`). Everything else—including a link the room made and dropped inside one tick, which
+is visible only as the rescue receipt advancing with no link ever published—is reported as `lost`,
+a failed rescue with no cause claimed.
+
+The cooldown countdown is a **client-side mirror**, not published state: the room keeps
+`grabCooldownUntil` private and re-decides every tick. The client rebuilds it from milestones it
+can already observe—a link disappearing, or the server rescue receipt advancing without a link
+ever being published—so the trust boundary is unchanged and a drifted mirror only makes the HUD
+optimistic for a frame.
+
 ## Implemented Colyseus room adapter
 
 `src/server/hellbreak-room.ts` wraps the transport-independent simulation in a Colyseus room:

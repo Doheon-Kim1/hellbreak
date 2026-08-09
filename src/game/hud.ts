@@ -24,30 +24,93 @@ export interface RescueLinkMemory {
 }
 
 /**
+ * Everything the readout needs to remember between authoritative patches. The room publishes no
+ * rescue history and no cooldown clock, so the client keeps its own echo of both: the link it was
+ * watching, the last rescue receipt it saw, and when it expects the room to accept a rescue again.
+ * None of it is authority—the room re-decides every tick—it only makes the outcome readable.
+ */
+export interface RescueHudMemory {
+  link: RescueLinkMemory | null
+  /** Match-elapsed second this client expects another rescue to be accepted at; 0 when free. */
+  lockedUntil: number
+  lockReason: RescueLockReason
+  /** Last rescue receipt seen, so a link the room made and dropped in one tick is still readable. */
+  acknowledgedGrab: number
+}
+
+export type RescueLockReason = 'cooldown' | 'exhausted' | null
+
+/**
+ * How the last link ended, limited to what the published snapshot actually proves.
+ *
+ * The room never publishes why a link ended, and several causes—range break, the teammate
+ * landing, the rescuer losing footing, a death, a disconnect—can happen in the same tick and are
+ * indistinguishable from outside. Only two endings are provable, so only two are named: the
+ * teammate visibly finished above where they were caught (`rescued`), and the published grip bar
+ * reached empty as the link disappeared, which is the room's own exhaustion rule (`exhausted`).
+ * Everything else is reported as `lost`: a rescue that failed, with no cause claimed.
+ *
+ * `rescued` is also the only outcome the room does not charge a cooldown for.
+ */
+export type RescueOutcome = 'rescued' | 'exhausted' | 'lost'
+
+/**
  * One always-present chip state, so the rescue prompt keeps its place in the layout instead of
  * mounting and unmounting while a teammate drifts across the reach boundary.
  */
-export type RescueHudState = 'idle' | 'ready' | 'holding' | 'held'
+export type RescueHudState = 'idle' | 'ready' | 'holding' | 'held' | 'cooldown' | 'exhausted'
+
+/** Grip is a spendable resource, so it is banded rather than left as a bare percentage. */
+export type RescueGripBand = 'steady' | 'warning' | 'danger'
 
 export interface RescueHudModel {
   state: RescueHudState
   linked: boolean
   showGrip: boolean
   gripPercent: number
+  gripBand: RescueGripBand
   targetLabel: string | null
   rescuedByLabel: string | null
+  /** Single line for the chip, already resolved for the current state. */
+  statusLabel: string
   promptVisible: boolean
+  outcome: RescueOutcome | null
   announcement: string | null
+  /** Whole tenths of a second left on the client-mirrored lockout; 0 when a rescue is allowed. */
+  lockoutSeconds: number
   links: RescueLinkView[]
 }
 
-/** Mirrors the room's own reach and drop rules so the prompt matches what the server will accept. */
+/**
+ * Presentation mirrors of the server-owned rescue profile in `src/server/rescue-balance.ts`.
+ *
+ * They are duplicated rather than imported on purpose: the balance profile stays server-only, and
+ * these numbers are all things a player already learns by playing. Nothing here is authority—if a
+ * mirror drifts, the room still refuses the rescue and the HUD is merely optimistic for a frame.
+ */
 const RESCUE_PROMPT_REACH = 2.4
 const RESCUE_PROMPT_DROP = 0.3
-/** Mirrors the room's lava panic band, for link colour only. */
 const RESCUE_PANIC_HEIGHT = 1.5
-/** Matches the room's completed-rescue landing gain. */
 const RESCUE_LANDING_GAIN = 0.3
+const RESCUE_RELEASE_COOLDOWN = 1.4
+const RESCUE_EXHAUSTION_COOLDOWN = 3
+/** Grip thresholds the warning and danger bands switch at. */
+const GRIP_WARNING = 0.55
+const GRIP_DANGER = 0.25
+
+const OUTCOME_LABELS: Record<RescueOutcome, string> = {
+  rescued: '구조 성공',
+  exhausted: '그립 소진',
+  lost: '구조 실패',
+}
+
+const STATE_LABELS: Record<Exclude<RescueHudState, 'cooldown'>, string> = {
+  idle: 'E · 구조 대기',
+  ready: 'E · 구조 가능',
+  holding: '구조 중',
+  held: '구조 받는 중',
+  exhausted: '그립 소진 · 회복 중',
+}
 
 const LAVA_LABELS: Record<string, string> = {
   calm: '상승 중',
@@ -79,10 +142,12 @@ export function rescueHudModel(
   players: readonly NetworkPlayerSnapshot[],
   ownPlayerId: string,
   lavaHeight: number,
-  previousLink: RescueLinkMemory | null = null,
+  memory: RescueHudMemory | null = null,
+  elapsed = 0,
 ): RescueHudModel {
   const own = players.find((player) => player.id === ownPlayerId) ?? null
   const byId = new Map(players.map((player) => [player.id, player]))
+  const previousLink = memory?.link ?? null
 
   const links: RescueLinkView[] = []
   for (const player of players) {
@@ -99,6 +164,16 @@ export function rescueHudModel(
   const grip = Number.isFinite(own?.grip) ? Math.min(1, Math.max(0, own!.grip)) : 1
 
   const rescued = Boolean(own) && own!.grabbedById !== ''
+
+  // A lockout the clock has already passed is over, and one further away than the longest cooldown
+  // the room can charge is a leftover from a restarted match rather than a live penalty.
+  const remainingLock = (memory?.lockedUntil ?? 0) - elapsed
+  const locked = !linked && !rescued
+    && remainingLock > 0
+    && remainingLock <= RESCUE_EXHAUSTION_COOLDOWN
+  const exhausted = !linked && !rescued
+    && (grip <= 0 || (locked && memory?.lockReason === 'exhausted'))
+
   const candidateNearby = Boolean(own) && !linked && !rescued && players.some((player) => (
     player.id !== ownPlayerId
     && player.alive
@@ -108,29 +183,91 @@ export function rescueHudModel(
     && (!player.grounded || player.y <= own!.y - RESCUE_PROMPT_DROP)
     && Math.hypot(player.x - own!.x, player.y - own!.y, player.z - own!.z) <= RESCUE_PROMPT_REACH
   ))
+  // The room refuses a rescue during a cooldown or on an empty grip, so the prompt must not
+  // promise one either.
+  const promptVisible = candidateNearby && !locked && !exhausted
 
   const justEnded = Boolean(previousLink) && !linked
   const endedTarget = justEnded ? byId.get(previousLink!.targetId) ?? null : null
-  const announcement = linked
-    ? '구조 시작'
-    : !justEnded
-        ? null
-        : endedTarget?.grounded && endedTarget.y >= previousLink!.caughtAtY + RESCUE_LANDING_GAIN
-            ? '구조 성공'
-            : grip <= 0
-                ? '그립 소진'
-                : '구조 실패'
+  // The room made a link and dropped it inside one tick, so no link was ever published and the
+  // advancing receipt is the only evidence it happened. That proves an attempt failed and nothing
+  // more, least of all why, so it is reported as exactly that.
+  const unseenAttemptFailed = Boolean(own) && !linked && !justEnded && memory !== null
+    && own!.lastAcknowledgedGrab > memory.acknowledgedGrab
+
+  // Two endings are provable from the snapshot alone: the teammate finished standing measurably
+  // above where this client saw them caught, and the grip bar published as empty on the same patch
+  // the link disappeared, which is the room's own exhaustion rule and cannot be reached any other
+  // way while a link is live. Every other ending — including several causes landing in the same
+  // tick — is indistinguishable from here and must not be given an invented cause.
+  const outcome: RescueOutcome | null = justEnded
+    ? endedTarget?.grounded && endedTarget.y >= previousLink!.caughtAtY + RESCUE_LANDING_GAIN
+        ? 'rescued'
+        : grip <= 0 ? 'exhausted' : 'lost'
+    : unseenAttemptFailed ? 'lost' : null
+
+  const state: RescueHudState = linked
+    ? 'holding'
+    : rescued
+        ? 'held'
+        : exhausted
+            ? 'exhausted'
+            : locked ? 'cooldown' : promptVisible ? 'ready' : 'idle'
+  // Tenths, so a 20 Hz patch stream cannot make the countdown jitter between whole seconds.
+  const lockoutSeconds = locked ? Math.ceil(remainingLock * 10) / 10 : 0
 
   return {
-    state: linked ? 'holding' : rescued ? 'held' : candidateNearby ? 'ready' : 'idle',
+    state,
     linked,
-    showGrip: linked || grip < 1,
+    showGrip: linked || grip < 1 || locked,
     gripPercent: Math.round(grip * 100),
+    gripBand: grip <= GRIP_DANGER ? 'danger' : grip <= GRIP_WARNING ? 'warning' : 'steady',
     targetLabel: linked ? '구조 중' : null,
     rescuedByLabel: rescued ? '구조 받는 중' : null,
-    promptVisible: candidateNearby,
-    announcement,
+    // A locked-out player is told how long, whichever failure put them there.
+    statusLabel: state === 'cooldown'
+      ? `구조 재시도 ${lockoutSeconds.toFixed(1)}초`
+      : state === 'exhausted' && lockoutSeconds > 0
+          ? `그립 소진 · ${lockoutSeconds.toFixed(1)}초`
+          : STATE_LABELS[state],
+    promptVisible,
+    outcome,
+    announcement: linked ? '구조 시작' : outcome === null ? null : OUTCOME_LABELS[outcome],
+    lockoutSeconds,
     links,
+  }
+}
+
+/**
+ * Carries the readout's memory into the next snapshot: the link being watched, the last rescue
+ * receipt, and the lockout the room is about to enforce.
+ *
+ * The cooldown is mirrored, never read: the room keeps its own clock and re-decides every tick.
+ * A completed rescue clears the lockout because the room charges no cooldown for one.
+ */
+export function nextRescueHudMemory(
+  previous: RescueHudMemory | null,
+  players: readonly NetworkPlayerSnapshot[],
+  ownPlayerId: string,
+  model: RescueHudModel,
+  elapsed: number,
+): RescueHudMemory {
+  const own = players.find((player) => player.id === ownPlayerId) ?? null
+  const failed = model.outcome !== null && model.outcome !== 'rescued'
+
+  return {
+    link: nextRescueLinkMemory(previous?.link ?? null, players, ownPlayerId),
+    lockedUntil: model.outcome === 'rescued'
+      ? 0
+      : failed
+          ? elapsed + (model.outcome === 'exhausted' ? RESCUE_EXHAUSTION_COOLDOWN : RESCUE_RELEASE_COOLDOWN)
+          : previous?.lockedUntil ?? 0,
+    lockReason: model.outcome === 'rescued'
+      ? null
+      : failed
+          ? (model.outcome === 'exhausted' ? 'exhausted' : 'cooldown')
+          : previous?.lockReason ?? null,
+    acknowledgedGrab: own?.lastAcknowledgedGrab ?? previous?.acknowledgedGrab ?? 0,
   }
 }
 

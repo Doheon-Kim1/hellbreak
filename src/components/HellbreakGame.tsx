@@ -15,8 +15,8 @@ import { abilitySpec, authoritativeHellEvent, hellEventAt, pickupAbility } from 
 import type { HellEventState, RunnerAbility } from '../game/hell-events'
 import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
-import { formatMatchClock, nextRescueLinkMemory, onlineHudModel, rescueHudModel } from '../game/hud'
-import type { OnlineHudModel, RescueHudModel, RescueLinkMemory, RescueLinkView } from '../game/hud'
+import { formatMatchClock, nextRescueHudMemory, onlineHudModel, rescueHudModel } from '../game/hud'
+import type { OnlineHudModel, RescueHudMemory, RescueHudModel, RescueLinkView } from '../game/hud'
 import { rescueRopeLength } from '../game/rescue-rope'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
@@ -858,34 +858,45 @@ function NetworkGameScene({
   )
 }
 
-const RESCUE_STATE_LABELS: Record<RescueHudModel['state'], string> = {
-  idle: 'E · 구조 대기',
-  ready: 'E · 구조 가능',
-  holding: '구조 중',
-  held: '구조 받는 중',
-}
-
 /**
  * Local-runner rescue readout for the online match. The chip keeps one place in the layout and
  * only swaps its state, so a teammate drifting across the reach boundary cannot make it flicker.
+ *
+ * Every value comes from the authoritative snapshot or from this client's own echo of it. The
+ * cooldown countdown is advisory: the room owns the real clock and re-decides every tick.
  */
 function RescueOverlay({ rescue, notice }: { rescue: RescueHudModel; notice: string | null }) {
   return (
     <>
-      <div className={`rescue-chip ${rescue.state}`} data-testid="rescue-status" data-state={rescue.state}>
-        {rescue.targetLabel ?? rescue.rescuedByLabel ?? RESCUE_STATE_LABELS[rescue.state]}
+      <div
+        className={`rescue-chip ${rescue.state}`}
+        data-testid="rescue-status"
+        data-state={rescue.state}
+        data-lockout={rescue.lockoutSeconds.toFixed(1)}
+      >
+        {rescue.statusLabel}
       </div>
       {rescue.showGrip && (
         <div
-          className={`grip-meter ${rescue.linked ? 'draining' : ''}`}
+          className={`grip-meter ${rescue.gripBand} ${rescue.linked ? 'draining' : ''}`}
           data-testid="rescue-grip"
           data-grip-percent={String(rescue.gripPercent)}
+          data-grip-band={rescue.gripBand}
         >
           <strong>그립</strong>
           <span><i style={{ width: `${rescue.gripPercent}%` }} /></span>
+          {/* Urgency is never carried by colour alone. */}
+          <em>{rescue.gripBand === 'danger' ? '위험' : rescue.gripBand === 'warning' ? '주의' : `${rescue.gripPercent}%`}</em>
         </div>
       )}
-      <div className="rescue-notice" role="status" data-testid="rescue-notice">{notice ?? ''}</div>
+      <div
+        className="rescue-notice"
+        role="status"
+        data-testid="rescue-notice"
+        data-outcome={rescue.outcome ?? ''}
+      >
+        {notice ?? ''}
+      </div>
     </>
   )
 }
@@ -997,14 +1008,16 @@ export default function HellbreakGame() {
   const network = useHellbreakRoom()
   const onlineConnected = gameMode === 'online' && network.status === 'connected'
   const onlineHud = onlineHudModel(network.match, network.players, network.ownPlayerId)
-  // The link the previous patch showed, so an ended link can be told apart from a completed one.
-  const rescueMemory = useRef<RescueLinkMemory | null>(null)
+  // What the previous patch showed, so an ended link can be told apart from a completed one and a
+  // failure can be read back as the cooldown the room is about to enforce.
+  const rescueMemory = useRef<RescueHudMemory | null>(null)
   const [rescueNotice, setRescueNotice] = useState<string | null>(null)
   const rescue = rescueHudModel(
     network.players,
     network.ownPlayerId,
     network.match.lavaHeight,
     rescueMemory.current,
+    network.match.elapsed,
   )
 
   const escapedBots = [0, 1, 2].filter((index) => botPoseAt(elapsed, index).escaped).length
@@ -1028,18 +1041,23 @@ export default function HellbreakGame() {
 
   // Advanced after the render that consumed it, so the next patch can classify a link that ended.
   useEffect(() => {
-    rescueMemory.current = nextRescueLinkMemory(
+    rescueMemory.current = nextRescueHudMemory(
       rescueMemory.current,
       network.players,
       network.ownPlayerId,
+      rescue,
+      network.match.elapsed,
     )
-  }, [network.players, network.ownPlayerId])
+  }, [network.players, network.ownPlayerId, network.match.elapsed, rescue])
 
   // Only link milestones reach the live region, and each one is held until the next milestone.
-  // Grip and coordinates move 20 times a second and must never be announced.
+  // Grip, cooldown countdowns, and coordinates move 20 times a second and must never be announced.
   useEffect(() => {
-    if (!onlineConnected) setRescueNotice(null)
-    else if (rescue.announcement !== null) setRescueNotice(rescue.announcement)
+    if (!onlineConnected) {
+      // A fresh connection starts with no link, no receipt, and no inherited lockout.
+      rescueMemory.current = null
+      setRescueNotice(null)
+    } else if (rescue.announcement !== null) setRescueNotice(rescue.announcement)
   }, [onlineConnected, rescue.announcement])
 
   useEffect(() => {

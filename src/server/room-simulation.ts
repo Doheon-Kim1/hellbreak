@@ -9,6 +9,7 @@ import {
   platformSurface,
   supportTopBelow,
 } from '../game/playground'
+import { RESCUE_BALANCE, rescueConeCos } from './rescue-balance'
 
 export interface PlayerInputCommand {
   sequence: number
@@ -112,36 +113,13 @@ const DEFAULT_MATCH_SECONDS = 180
 const LAVA_LETHAL_MARGIN = 0.35
 const LANDING_EPSILON = 0.01
 
-/** Three-dimensional reach a rescuer may start a link within. */
-const RESCUE_REACH = 2.4
-/** Three-dimensional distance that snaps an established link. */
-const RESCUE_BREAK_RANGE = 3.2
-/** A grounded teammate must be at least this far below the rescuer to be worth pulling. */
-const RESCUE_MIN_DROP = 0.3
-/** Broad 150° forward cone derived from the server-validated camera yaw. */
-const RESCUE_CONE_COS = Math.cos((75 * Math.PI) / 180)
-/** Horizontal speed the target is reeled in at, and the counter-drag the rescuer suffers. */
-const RESCUE_PULL_SPEED = 3.2
-const RESCUE_DRAG_SPEED = 0.9
-const RESCUE_LIFT_ACCEL = 26
-const RESCUE_MAX_LIFT_SPEED = 5.5
-/** Fraction of ordinary walking speed a rescuer keeps while a link is held. */
-const RESCUE_SPEED_SCALE = 0.55
-/** Hard per-tick displacement cap, so no force combination can teleport a runner. */
-const MAX_RESCUE_STEP = 0.5
-/** Downward probe used to re-resolve support after a rescue nudge moved a runner sideways. */
-const RESCUE_SUPPORT_PROBE = 0.02
-/** A target this close above the authoritative lava surface makes the rescue desperate. */
-const RESCUE_PANIC_HEIGHT = 1.5
-const RESCUE_PANIC_FORCE = 1.25
-const RESCUE_PANIC_DRAG = 1.5
-const RESCUE_PANIC_DRAIN = 1.5
-const GRIP_DRAIN_PER_SECOND = 0.34
-const GRIP_REGEN_PER_SECOND = 0.22
-const RESCUE_RELEASE_COOLDOWN = 1
-const RESCUE_EXHAUSTION_COOLDOWN = 1.5
-/** Height the target must gain over its link-start feet for the landing to count as a rescue. */
-const RESCUE_LANDING_GAIN = 0.3
+/**
+ * Every rescue number comes from the server-owned balance profile. It is imported here and in the
+ * room's own tests only: nothing on the client may read or influence it.
+ */
+const RESCUE = RESCUE_BALANCE
+/** Broad forward cone derived from the server-validated camera yaw. */
+const RESCUE_CONE_COS = rescueConeCos()
 
 /** Half the rendered capsule height, so `y` is the avatar centre and `y - half` its feet. */
 export const PLAYER_HALF_HEIGHT = 0.72
@@ -289,7 +267,7 @@ export function leaveRoom(room: AuthoritativeRoomState, authenticatedSessionId: 
         // reacquire cooldown instead of dropping straight onto the next teammate in reach.
         // Losing a rescuer costs the target nothing: it was never holding anyone.
         grabCooldownUntil: heldTarget
-          ? Math.max(player.grabCooldownUntil, room.elapsed + RESCUE_RELEASE_COOLDOWN)
+          ? Math.max(player.grabCooldownUntil, room.elapsed + RESCUE.releaseCooldown)
           : player.grabCooldownUntil,
       }] as const
     })),
@@ -361,7 +339,7 @@ function clampToWorld(value: number): number {
 function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState {
   const baseSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
   // Holding a teammate costs footing, so a rescuer walks slower until the link ends.
-  const speed = player.grabTargetId === '' ? baseSpeed : baseSpeed * RESCUE_SPEED_SCALE
+  const speed = player.grabTargetId === '' ? baseSpeed : baseSpeed * RESCUE.speedScale
   const localVelocity = movementVelocity(player.input, speed)
   const velocity = rotateMovementByCamera(localVelocity, player.input.cameraYaw ?? 0)
   const x = clampToWorld(player.x + velocity.x * delta)
@@ -420,14 +398,14 @@ function linkSurvives(rescuer: RoomPlayerState, target: RoomPlayerState): boolea
     && target.alive
     && !target.escaped
     && !target.grounded
-    && rescueDistance(rescuer, target) <= RESCUE_BREAK_RANGE
+    && rescueDistance(rescuer, target) <= RESCUE.breakRange
 }
 
 function isRescueCandidate(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
   return target.alive
     && !target.escaped
-    && (!target.grounded || target.y <= rescuer.y - RESCUE_MIN_DROP)
-    && rescueDistance(rescuer, target) <= RESCUE_REACH
+    && (!target.grounded || target.y <= rescuer.y - RESCUE.minDrop)
+    && rescueDistance(rescuer, target) <= RESCUE.reach
     && insideRescueCone(rescuer, target)
 }
 
@@ -501,7 +479,7 @@ function resolveRescueLinks(
 function resettleAfterRescue(player: RoomPlayerState): RoomPlayerState {
   if (player.velocityY > 0) return { ...player, grounded: false }
   const feet = player.y - PLAYER_HALF_HEIGHT
-  const support = supportTopBelow(player.x, player.z, feet, feet - RESCUE_SUPPORT_PROBE)
+  const support = supportTopBelow(player.x, player.z, feet, feet - RESCUE.supportProbe)
   return support === null
     ? { ...player, grounded: false }
     : { ...player, y: support + PLAYER_HALF_HEIGHT, velocityY: 0, grounded: true }
@@ -515,7 +493,7 @@ function panickingRescuers(
 ): Set<string> {
   const panicking = new Set<string>()
   for (const [rescuerId, targetId] of links) {
-    if (players[targetId].y - lavaHeight < RESCUE_PANIC_HEIGHT) panicking.add(rescuerId)
+    if (players[targetId].y - lavaHeight < RESCUE.panicHeight) panicking.add(rescuerId)
   }
   return panicking
 }
@@ -539,11 +517,11 @@ function applyRescueForces(
     const horizontal = Math.hypot(dx, dz)
     const unitX = horizontal < 1e-6 ? 0 : dx / horizontal
     const unitZ = horizontal < 1e-6 ? 0 : dz / horizontal
-    const force = panic ? RESCUE_PANIC_FORCE : 1
-    const pull = Math.min(MAX_RESCUE_STEP, RESCUE_PULL_SPEED * force * delta, horizontal / 2)
+    const force = panic ? RESCUE.panicPullMultiplier : 1
+    const pull = Math.min(RESCUE.maxStep, RESCUE.pullSpeed * force * delta, horizontal / 2)
     const drag = Math.min(
-      MAX_RESCUE_STEP,
-      RESCUE_DRAG_SPEED * (panic ? RESCUE_PANIC_DRAG : 1) * delta,
+      RESCUE.maxStep,
+      RESCUE.dragSpeed * (panic ? RESCUE.panicDragMultiplier : 1) * delta,
       horizontal / 2,
     )
 
@@ -556,7 +534,7 @@ function applyRescueForces(
       x: clampToWorld(target.x + unitX * pull),
       z: clampToWorld(target.z + unitZ * pull),
       velocityY: hauling
-        ? Math.min(RESCUE_MAX_LIFT_SPEED, target.velocityY + RESCUE_LIFT_ACCEL * force * delta)
+        ? Math.min(RESCUE.maxLiftSpeed, target.velocityY + RESCUE.liftAccel * force * delta)
         : target.velocityY,
     })
     players[rescuerId] = resettleAfterRescue({
@@ -601,7 +579,7 @@ function commitRescueLinks(
     // A rescue counts as completed when the target lands measurably above its link-start feet.
     const completed = ended
       && Boolean(previous?.grounded)
-      && (previous as RoomPlayerState).y - PLAYER_HALF_HEIGHT >= player.grabStartFeetY + RESCUE_LANDING_GAIN
+      && (previous as RoomPlayerState).y - PLAYER_HALF_HEIGHT >= player.grabStartFeetY + RESCUE.landingGain
 
     return [id, {
       ...player,
@@ -612,9 +590,9 @@ function commitRescueLinks(
         : targetId === '' ? 0 : player.grabStartFeetY,
       lastAcknowledgedGrab: startedNow || createdThenBroken ? player.lastSequence : player.lastAcknowledgedGrab,
       grabCooldownUntil: exhausted.has(id)
-        ? elapsed + RESCUE_EXHAUSTION_COOLDOWN
+        ? elapsed + RESCUE.exhaustionCooldown
         : (ended || createdThenBroken) && !completed
-            ? elapsed + RESCUE_RELEASE_COOLDOWN
+            ? elapsed + RESCUE.releaseCooldown
             : player.grabCooldownUntil,
     }] as const
   }))
@@ -663,10 +641,10 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
   const exhausted = new Set<string>()
   for (const [id, player] of Object.entries(advanced)) {
     const linked = links.has(id)
-    const drain = GRIP_DRAIN_PER_SECOND * (panicking.has(id) ? RESCUE_PANIC_DRAIN : 1)
+    const drain = RESCUE.gripDrainPerSecond * (panicking.has(id) ? RESCUE.panicDrainMultiplier : 1)
     const grip = linked
       ? player.grip - drain * delta
-      : player.grounded ? player.grip + GRIP_REGEN_PER_SECOND * delta : player.grip
+      : player.grounded ? player.grip + RESCUE.gripRegenPerSecond * delta : player.grip
     advanced[id] = { ...player, grip: Math.min(1, Math.max(0, grip)) }
     // Exhausted grip drops the link inside the same tick that emptied it.
     if (linked && advanced[id].grip <= 0) {

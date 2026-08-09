@@ -229,6 +229,19 @@ describe('Colyseus HELLBREAK room', () => {
     const acknowledged = seenBy(roomA, rescuerId).lastAcknowledgedGrab
     expect(seenBy(roomA, rescuerId).grabTargetId).toBe(jumperId)
 
+    // Grip is a spendable resource on the wire, not only in the simulation: while the room
+    // publishes the link it only ever falls, and it never falls below empty.
+    const drainSamples: number[] = []
+    for (let sample = 0; sample < 4; sample += 1) {
+      drainSamples.push(seenBy(roomA, rescuerId).grip)
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    for (const [index, grip] of drainSamples.entries()) {
+      expect(grip).toBeLessThanOrEqual(index === 0 ? 1 : drainSamples[index - 1])
+      expect(grip).toBeGreaterThanOrEqual(0)
+    }
+    expect(drainSamples.at(-1)).toBeLessThan(1)
+
     // Every client receives the same authoritative link, grip, and receipt.
     await waitFor(() => seenBy(roomC, rescuerId).lastAcknowledgedGrab === acknowledged, 5_000)
     expect(seenBy(roomB, rescuerId).grabTargetId).toBe(jumperId)
@@ -277,6 +290,16 @@ describe('Colyseus HELLBREAK room', () => {
     await waitFor(() => seenBy(roomA, rescuerId).grabTargetId === '', 5_000)
     await waitFor(() => seenBy(roomC, jumperId).grabbedById === '', 5_000)
     expect(seenBy(roomA, rescuerId).lastAcknowledgedGrab).toBe(acknowledged)
+
+    // Recovery is the slow half of the economy: an unlinked runner on solid ground regains grip,
+    // but at a small fraction of the rate a held link spends it.
+    const beforeRegen = seenBy(roomA, rescuerId).grip
+    const regenWindowMs = 500
+    await new Promise((resolve) => setTimeout(resolve, regenWindowMs))
+    const afterRegen = seenBy(roomA, rescuerId).grip
+    expect(afterRegen).toBeGreaterThanOrEqual(beforeRegen)
+    expect(afterRegen).toBeLessThanOrEqual(1)
+    expect((afterRegen - beforeRegen) / (regenWindowMs / 1_000)).toBeLessThan(0.3)
 
     await roomB.leave()
     rooms.splice(rooms.indexOf(roomB), 1)

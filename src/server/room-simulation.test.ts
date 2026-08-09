@@ -10,6 +10,7 @@ import {
   stepRoom,
 } from './room-simulation'
 import { lavaStateAt } from '../game/match'
+import { RESCUE_BALANCE, rescueHoldSeconds } from './rescue-balance'
 import type { AuthoritativeRoomState, PlayerInputCommand, RoomPlayerState } from './room-simulation'
 import {
   PLAYGROUND_GROUND_TOP,
@@ -608,6 +609,8 @@ describe('server-owned lava lifeline rescue', () => {
   const LEDGE_STAND_Y = LEDGE.top + PLAYER_HALF_HEIGHT
   /** Camera yaw whose validated forward vector points along +z, from the rescuer to the faller. */
   const YAW_TOWARD_TARGET = Math.PI
+  /** The room's own 20 Hz cadence, so tick-boundary expectations stay honest. */
+  const TICK_SECONDS = 0.05
 
   function rescuePair(fallerPose: Partial<RoomPlayerState> = {}): AuthoritativeRoomState {
     let room = joinRoom(createRoomState(), 'rescuer', 'session-a')
@@ -729,7 +732,49 @@ describe('server-owned lava lifeline rescue', () => {
 
     expect(freeStep).toBeGreaterThan(0)
     expect(linkedStep).toBeGreaterThan(0)
-    expect(linkedStep).toBeLessThan(freeStep * 0.75)
+    // Two separate costs land on the same step, so the bound is stated as both: the walk itself is
+    // scaled down by the server-owned factor, and the counter-drag can only take more away, never
+    // give any back. A rescuer's step therefore never exceeds the scaled walk.
+    const scaledWalk = freeStep * RESCUE_BALANCE.speedScale
+    const maxDrag = RESCUE_BALANCE.dragSpeed * RESCUE_BALANCE.panicDragMultiplier * 0.05
+    expect(linkedStep).toBeLessThanOrEqual(scaledWalk)
+    expect(linkedStep).toBeGreaterThan(scaledWalk - maxDrag)
+    // And the penalty is a heavy one: hauling a teammate costs most of the rescuer's footing
+    // rather than shaving a little off the top.
+    expect(linkedStep).toBeLessThan(freeStep * 0.4)
+  })
+
+  it('never lets a rescuer out-travel a free runner, even dragged along their own pull', () => {
+    // Walking straight at the target stacks the counter-drag on top of the reduced walk speed,
+    // which is the only way a link could pay out as horizontal mobility.
+    function travelTowardTarget(grab: boolean): number {
+      let room = applyPlayerInput(rescuePair(), 'session-a', {
+        sequence: 1,
+        grab,
+        forward: true,
+        cameraYaw: YAW_TOWARD_TARGET,
+      })
+      const startZ = room.players['rescuer'].z
+      let sequence = 1
+      for (let tick = 0; tick < 6; tick += 1) {
+        sequence += 1
+        room = applyPlayerInput(room, 'session-a', {
+          sequence,
+          grab,
+          forward: true,
+          cameraYaw: YAW_TOWARD_TARGET,
+        })
+        room = stepRoom(room, 0.05)
+      }
+      return room.players['rescuer'].z - startZ
+    }
+
+    const dragged = travelTowardTarget(true)
+    const free = travelTowardTarget(false)
+
+    expect(free).toBeGreaterThan(0)
+    expect(dragged).toBeGreaterThan(0)
+    expect(dragged).toBeLessThan(free)
   })
 
   /** A high ledge with open air beside it, so the pair can hang just above the rising lava. */
@@ -873,12 +918,51 @@ describe('server-owned lava lifeline rescue', () => {
 
     room = stepRoom(holdGrab(room, 2, 'session-a', false), 0.05)
     expect(room.players['rescuer'].grabTargetId).toBe('')
-    expect(room.players['rescuer'].grabCooldownUntil).toBeCloseTo(room.elapsed + 1)
+    expect(room.players['rescuer'].grabCooldownUntil)
+      .toBeCloseTo(room.elapsed + RESCUE_BALANCE.releaseCooldown)
 
     // Pressing again inside the cooldown window cannot start a second link.
     room = stepRoom(holdGrab(room, 3), 0.05)
     expect(room.players['rescuer'].grabTargetId).toBe('')
     expect(room.players['rescuer'].lastAcknowledgedGrab).toBe(1)
+  })
+
+  it('keeps a failed rescuer locked out for the whole cooldown even with E held down', () => {
+    let room = stepRoom(holdGrab(rescuePair(), 1), 0.05)
+    expect(room.players['rescuer'].grabTargetId).toBe('faller')
+
+    // Release, then hold E again for the rest of the cooldown without ever letting go.
+    room = stepRoom(holdGrab(room, 2, 'session-a', false), 0.05)
+    const lockedUntil = room.players['rescuer'].grabCooldownUntil
+    expect(lockedUntil).toBeGreaterThan(room.elapsed)
+
+    // Every tick that lands strictly inside the window is refused, not just the first one. The
+    // loop stops one tick short of the boundary, because the tick that reaches it is the tick the
+    // room is allowed to link again.
+    const releasedAt = room.elapsed
+    let sequence = 2
+    let refusedTicks = 0
+    while (room.elapsed + TICK_SECONDS < lockedUntil) {
+      sequence += 1
+      room = stepRoom(holdGrab(room, sequence), TICK_SECONDS)
+      refusedTicks += 1
+      expect(room.elapsed).toBeLessThan(lockedUntil)
+      expect(room.players['rescuer'].grabTargetId).toBe('')
+      expect(room.players['faller'].grabbedById).toBe('')
+      expect(room.players['rescuer'].lastAcknowledgedGrab).toBe(1)
+    }
+
+    // Those refusals really did cover the advertised cooldown, to within one tick.
+    expect(refusedTicks * TICK_SECONDS)
+      .toBeGreaterThan(RESCUE_BALANCE.releaseCooldown - 2 * TICK_SECONDS)
+    expect(room.elapsed - releasedAt).toBeLessThan(RESCUE_BALANCE.releaseCooldown)
+
+    // The same held intent links again on the first tick that reaches the boundary, and not before.
+    sequence += 1
+    room = stepRoom(holdGrab(room, sequence), TICK_SECONDS)
+    expect(room.elapsed).toBeGreaterThanOrEqual(lockedUntil)
+    expect(room.players['rescuer'].grabTargetId).toBe('faller')
+    expect(room.players['rescuer'].lastAcknowledgedGrab).toBe(sequence)
   })
 
   it('exhausts grip, drops the link, and applies the longer cooldown', () => {
@@ -887,12 +971,87 @@ describe('server-owned lava lifeline rescue', () => {
     expect(room.players['rescuer'].grip).toBe(0)
     expect(room.players['rescuer'].grabTargetId).toBe('')
     expect(room.players['faller'].grabbedById).toBe('')
-    expect(room.players['rescuer'].grabCooldownUntil).toBeCloseTo(room.elapsed + 1.5)
+    expect(room.players['rescuer'].grabCooldownUntil)
+      .toBeCloseTo(room.elapsed + RESCUE_BALANCE.exhaustionCooldown)
+    // Running the bar to zero costs strictly more than letting go in time.
+    expect(RESCUE_BALANCE.exhaustionCooldown).toBeGreaterThan(RESCUE_BALANCE.releaseCooldown)
+  })
+
+  /**
+   * Holds a teammate at one fixed airborne pose every tick until the rescuer's grip runs out.
+   *
+   * A real haul ends itself: the target lands and the rescue completes long before a full bar is
+   * spent. Pinning the pair isolates the grip economy from the haul, so the drain rate is what
+   * ends the link. Tests place runners directly because no client message may set authoritative
+   * coordinates, and the pose written here is the same one the room would have refused to take
+   * from a client.
+   */
+  function holdUntilExhausted(fallerPose: Partial<RoomPlayerState>): {
+    room: AuthoritativeRoomState
+    heldSeconds: number
+    panicTicks: number
+    sequence: number
+  } {
+    let room = rescuePair(fallerPose)
+    let sequence = 0
+    let heldSeconds = 0
+    let panicTicks = 0
+
+    for (let tick = 0; tick < 400 && room.players['rescuer'].grip > 0; tick += 1) {
+      sequence += 1
+      room = placeRunner(room, 'rescuer', {
+        x: LEDGE_X,
+        y: LEDGE_STAND_Y,
+        z: LEDGE_Z,
+        velocityY: 0,
+        grounded: true,
+      })
+      room = placeRunner(room, 'faller', { velocityY: 0, grounded: false, ...fallerPose })
+      room = stepRoom(holdGrab(room, sequence), TICK_SECONDS)
+      // Only the ticks the room published a link for count toward the hold window.
+      if (room.players['rescuer'].grabTargetId !== '') heldSeconds += TICK_SECONDS
+      if (room.players['faller'].y - room.lavaHeight < RESCUE_BALANCE.panicHeight) panicTicks += 1
+    }
+
+    return { room, heldSeconds, panicTicks, sequence }
+  }
+
+  it('empties a full grip within the calm hold window and refills it far more slowly', () => {
+    // A teammate hanging clear of the lava band: the ordinary, non-desperate rescue.
+    const drained = holdUntilExhausted({ x: LEDGE_X, y: -1.9, z: 20.2 })
+
+    expect(drained.panicTicks).toBe(0)
+    expect(drained.room.players['rescuer'].grip).toBe(0)
+    expect(drained.room.players['rescuer'].grabTargetId).toBe('')
+    expect(drained.room.players['faller'].grabbedById).toBe('')
+    // A single uninterrupted hold is a spendable resource measured in seconds, not a state.
+    expect(drained.heldSeconds).toBeLessThanOrEqual(rescueHoldSeconds())
+    expect(drained.heldSeconds).toBeGreaterThan(rescueHoldSeconds() - 2 * TICK_SECONDS)
+
+    // Recovering that spent bar costs several holds' worth of standing still with E released.
+    const spent = holdGrab(drained.room, drained.sequence + 1, 'session-a', false)
+    const recovered = stepUntil(spent, (state) => state.players['rescuer'].grip >= 1, 600)
+    expect(recovered.players['rescuer'].grip).toBe(1)
+    expect(recovered.elapsed - spent.elapsed).toBeGreaterThan(drained.heldSeconds * 3)
+  })
+
+  it('burns the same grip bar roughly twice as fast inside the lava panic band', () => {
+    // The same hold, with the teammate hanging inside the panic band above the rising lava.
+    const desperate = holdUntilExhausted({ x: LEDGE_X, y: -2.9, z: 19.6 })
+    const calm = holdUntilExhausted({ x: LEDGE_X, y: -1.9, z: 20.2 })
+
+    expect(desperate.panicTicks).toBeGreaterThan(0)
+    expect(desperate.heldSeconds).toBeLessThanOrEqual(rescueHoldSeconds(true))
+    expect(desperate.heldSeconds).toBeGreaterThan(rescueHoldSeconds(true) - 2 * TICK_SECONDS)
+    // Clutch, but never a free reset: a desperate hold is worth a fraction of a calm one.
+    expect(desperate.heldSeconds)
+      .toBeCloseTo(calm.heldSeconds / RESCUE_BALANCE.panicDrainMultiplier, 1)
   })
 
   it('regenerates grip only while grounded and unlinked, and clamps it to one', () => {
     const grounded = stepRoom(placeRunner(rescuePair(), 'rescuer', { grip: 0.5 }), 0.1)
-    expect(grounded.players['rescuer'].grip).toBeCloseTo(0.522)
+    expect(grounded.players['rescuer'].grip)
+      .toBeCloseTo(0.5 + RESCUE_BALANCE.gripRegenPerSecond * 0.1)
 
     const airborne = stepRoom(
       placeRunner(rescuePair(), 'rescuer', { grip: 0.5, grounded: false, y: SPAWN_Y + 3, velocityY: 0 }),
@@ -956,7 +1115,8 @@ describe('server-owned lava lifeline rescue', () => {
     expect(room.players['rescuer'].grip).toBe(1)
     // The room really did make the link this tick, so the receipt stands and the failure costs a cooldown.
     expect(room.players['rescuer'].lastAcknowledgedGrab).toBe(1)
-    expect(room.players['rescuer'].grabCooldownUntil).toBeCloseTo(room.elapsed + 1)
+    expect(room.players['rescuer'].grabCooldownUntil)
+      .toBeCloseTo(room.elapsed + RESCUE_BALANCE.releaseCooldown)
   })
 
   it('completes a rescue when the target lands above its link-start feet height', () => {
