@@ -11,6 +11,9 @@ import type {
   NetworkPlayerSnapshot,
   RoomJoinMode,
 } from '../shared/multiplayer-protocol'
+import { openRoomWhenAwake, roomConnectionMessage } from './room-connection'
+import type { RoomConnectionPhase } from './room-connection'
+import { wakeRoomServer } from './room-wakeup'
 
 export type RoomConnectionStatus = 'unavailable' | 'idle' | 'connecting' | 'connected' | 'error'
 
@@ -77,6 +80,7 @@ function snapshotMatch(state: HellbreakRoomState | undefined): NetworkMatchSnaps
 export function useHellbreakRoom() {
   const [endpoint, setEndpoint] = useState<string | null>(null)
   const [status, setStatus] = useState<RoomConnectionStatus>('unavailable')
+  const [connectionPhase, setConnectionPhase] = useState<RoomConnectionPhase>('idle')
   const [roomId, setRoomId] = useState('')
   const [ownPlayerId, setOwnPlayerId] = useState('')
   const [players, setPlayers] = useState<NetworkPlayerSnapshot[]>([])
@@ -87,11 +91,24 @@ export function useHellbreakRoom() {
   const sequenceRef = useRef(0)
   const connectionAttemptRef = useRef(0)
   const connectingRef = useRef(false)
+  /** Aborts the health probe of whichever attempt is currently in flight, if any. */
+  const wakeRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     const resolved = configuredEndpoint()
     setEndpoint(resolved)
     setStatus(resolved ? 'idle' : 'unavailable')
+  }, [])
+
+  /**
+   * Invalidates the attempt in flight: bumps the generation every callback checks, and aborts the
+   * outstanding probe so a wake that had 80 seconds left stops now instead of resolving into state
+   * for a screen that has moved on.
+   */
+  const abandonAttempt = useCallback(() => {
+    connectionAttemptRef.current += 1
+    wakeRef.current?.abort()
+    wakeRef.current = null
   }, [])
 
   const clearRoom = useCallback(() => {
@@ -106,7 +123,7 @@ export function useHellbreakRoom() {
   }, [])
 
   const leave = useCallback(async () => {
-    connectionAttemptRef.current += 1
+    abandonAttempt()
     const room = roomRef.current
     clearRoom()
     if (room) {
@@ -117,16 +134,17 @@ export function useHellbreakRoom() {
       }
     }
     setError(null)
+    setConnectionPhase('idle')
     setStatus(endpoint ? 'idle' : 'unavailable')
-  }, [clearRoom, endpoint])
+  }, [abandonAttempt, clearRoom, endpoint])
 
   useEffect(() => () => {
-    connectionAttemptRef.current += 1
+    abandonAttempt()
     const room = roomRef.current
     roomRef.current = null
     room?.removeAllListeners()
     void room?.leave(true)
-  }, [])
+  }, [abandonAttempt])
 
   const connect = useCallback(async (kind: 'create' | 'join', requestedRoomId = '') => {
     if (!endpoint || connectingRef.current) return
@@ -138,8 +156,12 @@ export function useHellbreakRoom() {
     }
 
     connectingRef.current = true
-    const attempt = connectionAttemptRef.current + 1
-    connectionAttemptRef.current = attempt
+    abandonAttempt()
+    const attempt = connectionAttemptRef.current
+    const wake = new AbortController()
+    wakeRef.current = wake
+    const current = () => connectionAttemptRef.current === attempt && !wake.signal.aborted
+
     const previousRoom = roomRef.current
     clearRoom()
     if (previousRoom) {
@@ -149,22 +171,50 @@ export function useHellbreakRoom() {
         // The previous connection is already closed.
       }
     }
-    if (connectionAttemptRef.current !== attempt) {
+    if (!current()) {
       connectingRef.current = false
       return
     }
     setStatus('connecting')
+    setConnectionPhase('waking')
     setError(null)
+
     try {
-      const client = new Client(endpoint)
-      const room = kind === 'create'
-        ? await client.create<HellbreakRoomState>(HELLBREAK_ROOM_NAME)
-        : await client.joinById<HellbreakRoomState>(normalizedRoomId)
-      if (connectionAttemptRef.current !== attempt) {
-        room.removeAllListeners()
-        await room.leave(true)
+      const result = await openRoomWhenAwake<ClientRoom>({
+        // The free Render instance suspends when idle. Knocking on `/health` until it answers is
+        // what keeps the SDK's one matchmaking request from being the thing that discovers it.
+        wake: () => wakeRoomServer({ endpoint, mode: 'guest', signal: wake.signal }),
+        open: () => {
+          const client = new Client(endpoint)
+          return kind === 'create'
+            ? client.create<HellbreakRoomState>(HELLBREAK_ROOM_NAME)
+            : client.joinById<HellbreakRoomState>(normalizedRoomId)
+        },
+        onPhase: (phase) => {
+          if (current()) setConnectionPhase(phase)
+        },
+        superseded: () => !current(),
+      })
+
+      if (!current()) {
+        // Left, unmounted, or superseded while the room was opening: hand the seat straight back.
+        if (result.ok) {
+          result.room.removeAllListeners()
+          await result.room.leave(true).catch(() => undefined)
+        }
         return
       }
+      if (!result.ok) {
+        // A cancelled attempt has already been answered by whoever cancelled it.
+        if (result.failure === 'cancelled') return
+        clearRoom()
+        setError(roomConnectionMessage(result.failure, kind))
+        setConnectionPhase('idle')
+        setStatus('error')
+        return
+      }
+
+      const { room } = result
       roomRef.current = room
       setRoomId(room.roomId)
       setOwnPlayerId(room.sessionId)
@@ -179,6 +229,7 @@ export function useHellbreakRoom() {
       room.onLeave(() => {
         if (roomRef.current !== room) return
         clearRoom()
+        setConnectionPhase('idle')
         setStatus(endpoint ? 'idle' : 'unavailable')
       })
       room.onError(() => {
@@ -186,17 +237,21 @@ export function useHellbreakRoom() {
         setError('룸 서버 연결 중 오류가 발생했습니다.')
         setStatus('error')
       })
+      setConnectionPhase('idle')
       setStatus('connected')
-    } catch (connectionError) {
-      if (connectionAttemptRef.current !== attempt) return
+    } catch {
+      // `openRoomWhenAwake` already absorbs every network and SDK failure, so only wiring up the
+      // room can land here. It still gets a written sentence rather than a rejected promise.
+      if (!current()) return
       clearRoom()
-      const fallback = kind === 'create' ? '룸을 만들지 못했습니다.' : '해당 룸에 참가하지 못했습니다.'
-      setError(connectionError instanceof Error ? connectionError.message : fallback)
+      setError(roomConnectionMessage('join-refused', kind))
+      setConnectionPhase('idle')
       setStatus('error')
     } finally {
+      if (wakeRef.current === wake) wakeRef.current = null
       connectingRef.current = false
     }
-  }, [clearRoom, endpoint])
+  }, [abandonAttempt, clearRoom, endpoint])
 
   const createRoom = useCallback(() => connect('create'), [connect])
   const joinRoom = useCallback((requestedRoomId: string) => connect('join', requestedRoomId), [connect])
@@ -215,6 +270,8 @@ export function useHellbreakRoom() {
   return {
     endpoint,
     status,
+    /** What a `connecting` status is actually doing, so the wait can be described honestly. */
+    connectionPhase,
     roomId,
     roomMode,
     ownPlayerId,

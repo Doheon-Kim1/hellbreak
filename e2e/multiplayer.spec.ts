@@ -142,6 +142,115 @@ test('the online lobby offers the guest demo and closes the HIVE queue with a re
   expect(pageErrors).toEqual([])
 })
 
+/**
+ * Every POST the Colyseus SDK sends to matchmaking. Preflights are excluded by method so the count
+ * is "how many rooms were asked for", which is the number that actually matters.
+ */
+function watchMatchmaking(page: Page): string[] {
+  const requests: string[] = []
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && request.url().includes('/matchmake/')) {
+      requests.push(request.url())
+    }
+  })
+  return requests
+}
+
+/**
+ * The public regression: on GitHub Pages the free room server is suspended, so the SDK's own
+ * matchmaking request was the thing that discovered it and the player was shown `Failed to fetch`.
+ * Health failing first and then answering is exactly that cold start, at test speed.
+ */
+test('a suspended room server is woken first, then asked for exactly one room', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  const matchmaking = watchMatchmaking(page)
+  let probes = 0
+  await page.route('**/health', async (route) => {
+    probes += 1
+    // The first two attempts fail the way a browser fails against an instance that is not up.
+    if (probes <= 2) await route.abort('failed')
+    else await route.continue()
+  })
+
+  await openOnlineTab(page)
+  await page.getByRole('button', { name: '온라인 룸 만들기' }).click()
+
+  // Busy and truthful while it waits: the wait is named, and nothing claims to be connected.
+  const progress = page.getByTestId('room-progress')
+  await expect(progress).toHaveAttribute('data-phase', 'waking')
+  await expect(progress).toContainText('무료 룸 서버를 깨우는 중')
+  await expect(page.getByTestId('room-id')).toHaveCount(0)
+  await expect(page.locator('.room-error')).toHaveCount(0)
+
+  await expect(page.getByTestId('player-count')).toContainText('참가자 1/6', { timeout: 30_000 })
+  await expect(page.getByTestId('room-mode')).toHaveAttribute('data-mode', 'guest')
+  await expect(progress).toHaveCount(0)
+  expect(probes).toBe(3)
+  // Never retried: a second create through an ambiguous answer is a room nobody is in.
+  expect(matchmaking).toHaveLength(1)
+  expect(pageErrors).toEqual([])
+})
+
+test('a room server that never wakes ends in a stable Korean message and creates nothing', async ({ page }) => {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  const matchmaking = watchMatchmaking(page)
+  await page.route('**/health', (route) => route.abort('failed'))
+
+  await openOnlineTab(page)
+  await page.getByRole('button', { name: '온라인 룸 만들기' }).click()
+  await expect(page.getByTestId('room-progress')).toHaveAttribute('data-phase', 'waking')
+
+  const failure = page.locator('.room-error')
+  await expect(failure).toContainText('무료 룸 서버', { timeout: 60_000 })
+  await expect(failure).toContainText('다시 시도')
+  // The raw browser sentence is what this whole boundary exists to keep off the screen.
+  await expect(failure).not.toContainText('Failed to fetch')
+  await expect(page.getByTestId('room-id')).toHaveCount(0)
+  await expect(page.getByTestId('room-progress')).toHaveCount(0)
+  // Nothing was ever asked of the room server, so there is no half-made room to clean up.
+  expect(matchmaking).toEqual([])
+  // And the player can act on the advice they were just given.
+  await expect(page.getByRole('button', { name: '온라인 룸 만들기' })).toBeEnabled()
+  expect(pageErrors).toEqual([])
+})
+
+test('a server that refuses guests says so instead of trying to create a room', async ({ page }) => {
+  const matchmaking = watchMatchmaking(page)
+  await page.route('**/health', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'access-control-allow-origin': '*' },
+    body: JSON.stringify({ ok: true, room: 'hellbreak', guestJoin: false, authenticatedJoin: true }),
+  }))
+
+  await openOnlineTab(page)
+  await page.getByRole('button', { name: '온라인 룸 만들기' }).click()
+
+  const failure = page.locator('.room-error')
+  await expect(failure).toContainText('게스트')
+  await expect(failure).not.toContainText('Failed to fetch')
+  expect(matchmaking).toEqual([])
+})
+
+/**
+ * The other half of the leak: even past a healthy server, the SDK's own failure text was put on
+ * screen verbatim. `Failed to fetch` names one socket and tells a player nothing they can do.
+ */
+test('a refused room request is written in Korean rather than in the browser words', async ({ page }) => {
+  await page.route('**/matchmake/**', (route) => route.abort('failed'))
+
+  await openOnlineTab(page)
+  await page.getByRole('button', { name: '온라인 룸 만들기' }).click()
+
+  const failure = page.locator('.room-error')
+  await expect(failure).toContainText('룸을 만들지 못했습니다')
+  await expect(failure).not.toContainText('Failed to fetch')
+  await expect(failure).not.toContainText('matchmake')
+  await expect(page.getByTestId('room-id')).toHaveCount(0)
+})
+
 test('the HIVE routes answer honestly on a server origin with no credentials', async ({ request }) => {
   const capability = await request.get('/api/hive/session')
   expect(capability.status()).toBe(200)

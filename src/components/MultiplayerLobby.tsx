@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import { roomPhaseLabel } from '../network/room-connection'
+import type { RoomConnectionPhase } from '../network/room-connection'
 import type { RoomConnectionStatus } from '../network/use-hellbreak-room'
 import type { MultiplayerModeId, MultiplayerModeView } from '../shared/multiplayer-modes'
 import type { RoomJoinMode } from '../shared/multiplayer-protocol'
@@ -15,6 +17,7 @@ import type { RoomJoinMode } from '../shared/multiplayer-protocol'
  */
 export function MultiplayerLobby({
   status,
+  connectionPhase,
   roomId,
   roomMode,
   playerCount,
@@ -29,6 +32,7 @@ export function MultiplayerLobby({
   onRestart,
 }: {
   status: RoomConnectionStatus
+  connectionPhase: RoomConnectionPhase
   roomId: string
   roomMode: RoomJoinMode
   playerCount: number
@@ -44,6 +48,10 @@ export function MultiplayerLobby({
 }) {
   const [joinId, setJoinId] = useState('')
   const connected = status === 'connected'
+  const connecting = status === 'connecting'
+  // The free room server suspends when idle, so a connection attempt can honestly take a minute
+  // and a half. The wait is named while it happens rather than left to look like a hang.
+  const progress = connecting ? roomPhaseLabel(connectionPhase) : null
   const { guest, hive } = modes
 
   return (
@@ -110,8 +118,8 @@ export function MultiplayerLobby({
         </>
       ) : (
         <>
-          <button type="button" onClick={onCreate} disabled={status === 'connecting'}>
-            {status === 'connecting' ? '연결 중…' : '온라인 룸 만들기'}
+          <button type="button" onClick={onCreate} disabled={connecting} aria-busy={connecting}>
+            {connecting ? '연결 중…' : '온라인 룸 만들기'}
           </button>
           <div className="join-room-row">
             <label htmlFor="room-id-input">룸 ID</label>
@@ -123,10 +131,20 @@ export function MultiplayerLobby({
               onChange={(event) => setJoinId(event.target.value)}
               placeholder="공유받은 룸 ID"
             />
-            <button type="button" onClick={() => onJoin(joinId)} disabled={status === 'connecting'}>
+            <button type="button" onClick={() => onJoin(joinId)} disabled={connecting} aria-busy={connecting}>
               참가
             </button>
           </div>
+          {progress && (
+            <p
+              className="room-progress"
+              role="status"
+              data-testid="room-progress"
+              data-phase={connectionPhase}
+            >
+              {progress}
+            </p>
+          )}
         </>
       )}
       {error && <p className="room-error" role="alert">{error}</p>}

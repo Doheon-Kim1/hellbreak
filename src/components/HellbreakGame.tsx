@@ -28,6 +28,7 @@ import {
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { interpolateNetworkPosition } from '../network/interpolation'
+import { roomPhaseLabel } from '../network/room-connection'
 import { useHellbreakRoom } from '../network/use-hellbreak-room'
 import { useMultiplayerModes } from '../network/use-multiplayer-modes'
 import type { MultiplayerModeId } from '../shared/multiplayer-modes'
@@ -1268,7 +1269,8 @@ export default function HellbreakGame() {
     : network.status === 'unavailable'
       ? '온라인 룸 서버 주소가 필요합니다'
       : network.status === 'connecting'
-        ? '온라인 룸 연결 중…'
+        // Says which part of the wait this is, because waking the free server is most of it.
+        ? roomPhaseLabel(network.connectionPhase) ?? '온라인 룸 연결 중…'
         : network.status === 'connected'
           ? sceneReady ? onlineHud.statusLabel : '온라인 놀이터 준비 중…'
           : network.status === 'error'
@@ -1313,6 +1315,7 @@ export default function HellbreakGame() {
             {onlineConnected && <OnlineMatchHud hud={onlineHud} eliminations={network.match.eliminations} />}
             <MultiplayerLobby
               status={network.status}
+              connectionPhase={network.connectionPhase}
               roomId={network.roomId}
               roomMode={network.roomMode}
               modes={multiplayerModes}

@@ -51,8 +51,13 @@ button.active-match { border-color: #9d6555; color: #a98579; }
 .branch-explanation { margin: 0; padding: .55rem .65rem; border-left: 2px solid #6d5560; color: #a9959e; font-size: .68rem; line-height: 1.55; }
 .room-mode { border: 1px solid rgba(120, 170, 178, .4); padding: .18rem .35rem; }
 .room-mode.authenticated { border-color: rgba(112, 246, 255, .55); color: #c9fbff !important; }
-.room-message, .room-error { margin: 0; color: #a9959e; font-size: .72rem; line-height: 1.5; }
+.room-message, .room-error, .room-progress { margin: 0; color: #a9959e; font-size: .72rem; line-height: 1.5; }
 .room-error { color: #ff947a; }
+/* A named wait, not a failure: the free room server is allowed to take a while to come back. */
+.room-progress { display: flex; align-items: center; gap: .45rem; color: #9befff; }
+.room-progress::before { width: .45rem; height: .45rem; border-radius: 50%; background: #70f6ff; animation: room-waking 1.1s ease-in-out infinite; content: ''; }
+@keyframes room-waking { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .room-progress::before { animation: none; opacity: 1; } }
 .room-summary { display: grid; grid-template-columns: auto 1fr auto; gap: .65rem; align-items: center; padding: .8rem; border: 1px solid rgba(112, 246, 255, .24); background: rgba(17, 40, 47, .35); }
 .room-summary span, .room-summary small { color: #78aab2; font: 700 .58rem ui-monospace, monospace; letter-spacing: .1em; }
 .room-summary strong { min-width: 0; overflow: hidden; color: #c9fbff; font: 800 .7rem ui-monospace, monospace; text-overflow: ellipsis; }
