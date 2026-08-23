@@ -18,17 +18,28 @@ test('loads the HELLBREAK playground and starts the new danger loop', async ({ p
   expect(errors).toEqual([])
 })
 
-test('keeps a full-height visible 3D viewport and controls on mobile', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/')
-  await page.getByRole('button', { name: '봇 경기 시작' }).click()
+test('keeps a full-height visible 3D viewport and controls on mobile', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  })
+  const page = await context.newPage()
 
-  await expect(page.locator('.key-art')).toHaveCount(0, { timeout: 15_000 })
-  await expect(page.locator('.mobile-controls')).toBeVisible()
-  await expect(page.getByRole('button', { name: '능력 사용' })).toBeVisible()
+  try {
+    await page.goto('/', { waitUntil: 'networkidle' })
+    await page.getByRole('button', { name: '봇 경기 시작' }).click()
 
-  const canvasBox = await page.locator('canvas').boundingBox()
-  expect(canvasBox?.width).toBe(390)
-  expect(canvasBox?.height).toBe(844)
-  await expect(page.locator('.scene-error')).toHaveCount(0)
+    await expect(page.locator('.key-art')).toHaveCount(0, { timeout: 15_000 })
+    await expect(page.locator('.mobile-controls')).toBeVisible()
+    await expect(page.getByRole('button', { name: '능력 사용' })).toBeVisible()
+
+    const canvasBox = await page.locator('canvas').boundingBox()
+    expect(canvasBox?.width).toBe(390)
+    expect(canvasBox?.height).toBe(844)
+    await expect(page.locator('.scene-error')).toHaveCount(0)
+  } finally {
+    await context.close()
+  }
 })

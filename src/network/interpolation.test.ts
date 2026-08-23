@@ -23,6 +23,19 @@ describe('network position interpolation', () => {
     expect(interpolateNetworkPosition(from, { x: 4, y: 5, z: 6 }, Number.NaN)).toEqual(from)
   })
 
+  it('reuses a caller-owned output during render interpolation', () => {
+    const out = { x: 0, y: 0, z: 0 }
+    const result = interpolateNetworkPosition(
+      { x: 0, y: -2, z: 0 },
+      { x: 4, y: 2, z: -4 },
+      0.5,
+      out,
+    )
+
+    expect(result).toBe(out)
+    expect(out).toEqual({ x: 2, y: 0, z: -2 })
+  })
+
   it('snaps instead of sliding when the server teleports an avatar', () => {
     // A match restart moves a runner from the exit platform back to spawn in one patch,
     // but an ordinary jump must still smooth vertically.

@@ -28,6 +28,25 @@ export interface RescueRopePresence {
 /** Below this the two anchors share a point and normalizing their difference is meaningless. */
 export const RESCUE_ROPE_MIN_LENGTH = 1e-3
 
+function finiteAnchor(anchor: RescueRopeAnchor | null | undefined): anchor is RescueRopeAnchor {
+  return Boolean(anchor)
+    && Number.isFinite(anchor?.x)
+    && Number.isFinite(anchor?.y)
+    && Number.isFinite(anchor?.z)
+}
+
+/**
+ * Prefer an articulated glove/harness endpoint, but safely fall back to the interpolated avatar root.
+ * Returning an existing object keeps this presentation lookup allocation-free; no safe endpoint
+ * means the ordinary presence check hides the rope.
+ */
+export function selectRescueRopeAnchor(
+  preferred: RescueRopeAnchor | null | undefined,
+  fallback: RescueRopeAnchor | null | undefined,
+): RescueRopeAnchor | undefined {
+  return finiteAnchor(preferred) ? preferred : finiteAnchor(fallback) ? fallback : undefined
+}
+
 /**
  * Distance between the two interpolated avatar anchors a rescue rope is drawn across, or `0` when
  * the rope must be hidden instead: an avatar that has not rendered or already left, a non-finite

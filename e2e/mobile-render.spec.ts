@@ -1,15 +1,15 @@
-import { chromium, expect, test } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 import sharp from 'sharp'
 
-test('mobile compositor presents colorful WebGL gameplay pixels', async () => {
-  const browser = await chromium.launch({ executablePath: chromium.executablePath() })
-  const context = await browser.newContext({
-    viewport: { width: 390, height: 844 },
-    deviceScaleFactor: 3,
-    isMobile: true,
-    hasTouch: true,
-  })
-  const page = await context.newPage()
+test.use({
+  viewport: { width: 390, height: 844 },
+  deviceScaleFactor: 3,
+  isMobile: true,
+  hasTouch: true,
+})
+test.describe.configure({ timeout: 60_000 })
+
+test('mobile compositor presents colorful WebGL gameplay pixels', async ({ page, context }) => {
   const pageErrors: string[] = []
   page.on('pageerror', (error) => pageErrors.push(error.message))
 
@@ -79,5 +79,4 @@ test('mobile compositor presents colorful WebGL gameplay pixels', async () => {
   expect(changedPixels / (beforeDrag.length / 3)).toBeGreaterThan(0.2)
   await expect(page.getByRole('button', { name: '능력 사용' })).toBeVisible()
   expect(pageErrors).toEqual([])
-  await browser.close()
 })

@@ -3,21 +3,21 @@
 import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber'
 import { CapsuleCollider, CuboidCollider, Physics, RigidBody, useRapier } from '@react-three/rapier'
 import type { IntersectionEnterPayload, IntersectionExitPayload, RapierCollider, RapierRigidBody } from '@react-three/rapier'
-import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Matrix4, Quaternion, Vector3 } from 'three'
-import type { Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
+import type { Group, Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
 import { DEFAULT_CAMERA_ORBIT, cameraOrbitOffset, rotateMovementByCamera, updateCameraOrbit } from '../game/camera'
 import type { CameraOrbit } from '../game/camera'
 import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
 import { abilitySpec, authoritativeHellEvent, hellEventAt, pickupAbility } from '../game/hell-events'
 import type { HellEventState, RunnerAbility } from '../game/hell-events'
-import { botPoseAt, cycleSpectatorIndex, movementVelocity } from '../game/movement'
+import { botPoseAt, botVisualVelocity, cycleSpectatorIndex, movementVelocity } from '../game/movement'
 import { createMatch, stepMatch } from '../game/match'
 import { formatMatchClock, nextRescueHudMemory, onlineHudModel, rescueHudModel } from '../game/hud'
 import type { OnlineHudModel, RescueHudMemory, RescueHudModel, RescueLinkView } from '../game/hud'
-import { rescueRopePresence } from '../game/rescue-rope'
+import { rescueRopePresence, selectRescueRopeAnchor } from '../game/rescue-rope'
 import { RESCUE_ROPE_SEGMENTS, createRescueRopeResources } from '../game/rescue-rope-material'
 import {
   approachRescueValue,
@@ -27,6 +27,7 @@ import {
 } from '../game/rescue-rope-visuals'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
+import { PLAYGROUND_PLATFORM_THICKNESS } from '../game/playground'
 import { interpolateNetworkPosition } from '../network/interpolation'
 import { roomPhaseLabel } from '../network/room-connection'
 import { useHellbreakRoom } from '../network/use-hellbreak-room'
@@ -39,6 +40,9 @@ import type {
 } from '../shared/multiplayer-protocol'
 import { GiantPlayground } from './GiantPlayground'
 import { MultiplayerLobby } from './MultiplayerLobby'
+import { PlayerCharacter } from './PlayerCharacter'
+import type { PlayerCharacterAnchorRegistries, PlayerCharacterFrame } from './PlayerCharacter'
+import type { PlayerCharacterPresentationState } from '../game/player-character-pose'
 
 const PLAYER_SPEED = 5.8
 const SPRINT_SPEED = 8.2
@@ -69,6 +73,33 @@ type RunnerControls = {
   input: RefObject<RunnerControlSources>
   jumpQueued: RefObject<boolean>
   abilityQueued: RefObject<boolean>
+}
+
+function createCharacterFrame(overrides: Partial<PlayerCharacterFrame> = {}): PlayerCharacterFrame {
+  return {
+    elapsed: 0,
+    delta: 1 / 60,
+    velocityX: 0,
+    velocityY: 0,
+    velocityZ: 0,
+    grounded: true,
+    alive: true,
+    escaped: false,
+    rescueRole: 'none',
+    rescueDirectionX: 0,
+    rescueDirectionY: 0,
+    rescueDirectionZ: -1,
+    reducedMotion: false,
+    ...overrides,
+  }
+}
+
+function createCharacterAnchorRegistries(): PlayerCharacterAnchorRegistries {
+  return {
+    root: new Map(),
+    rightGlove: new Map(),
+    harness: new Map(),
+  }
 }
 
 function useRunnerControls(controls: RunnerControls) {
@@ -136,7 +167,7 @@ function useReducedMotion() {
 }
 
 function GameCamera({
-  player,
+  playerPosition,
   orbit,
   mode,
   elapsed,
@@ -144,7 +175,7 @@ function GameCamera({
   resetToken,
   networkTarget,
 }: {
-  player: RefObject<RapierRigidBody | null> | null
+  playerPosition: RefObject<Vector3> | null
   orbit: RefObject<CameraOrbit>
   mode: 'player' | 'spectator' | 'network'
   elapsed: number
@@ -213,7 +244,7 @@ function GameCamera({
       desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
       lookAt.set(pose.x, pose.y + 0.55, pose.z)
     } else {
-      const position = mode === 'network' ? networkTarget?.current : player?.current?.translation()
+      const position = mode === 'network' ? networkTarget?.current : playerPosition?.current
       if (!position) return
       const offset = cameraOrbitOffset(orbit.current)
       lookAt.set(position.x, position.y + 0.75, position.z)
@@ -229,8 +260,12 @@ function GameCamera({
 
 function PlayerRunner({
   body,
+  positionRef,
   active,
   renderBody,
+  freezeBody,
+  escaped,
+  reducedMotion,
   lavaHeight,
   elapsed,
   heldAbility,
@@ -243,8 +278,12 @@ function PlayerRunner({
   onEscape,
 }: {
   body: RefObject<RapierRigidBody | null>
+  positionRef: RefObject<Vector3>
   active: boolean
   renderBody: boolean
+  freezeBody: boolean
+  escaped: boolean
+  reducedMotion: boolean
   lavaHeight: number
   elapsed: number
   heldAbility: RunnerAbility | null
@@ -263,21 +302,59 @@ function PlayerRunner({
   const rocketUntil = useRef(0)
   const springArmed = useRef(false)
   const lavaGraceUntil = useRef(0)
+  const characterFrame = useRef<PlayerCharacterFrame>(createCharacterFrame({ reducedMotion }))
+  characterFrame.current.escaped = escaped
+  characterFrame.current.reducedMotion = reducedMotion
   useRunnerControls(controls)
 
   useEffect(() => {
     body.current?.setTranslation(SPAWN, true)
     body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    positionRef.current.set(SPAWN.x, SPAWN.y, SPAWN.z)
     deathCooldown.current = false
     groundContacts.current.clear()
     rocketUntil.current = 0
     springArmed.current = false
     lavaGraceUntil.current = 0
-  }, [body, resetToken])
+  }, [body, positionRef, resetToken])
 
-  useFrame(() => {
+  useEffect(() => {
     const runner = body.current
-    if (!runner || !active) return
+    if (!runner) return
+    if (freezeBody) {
+      runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
+      runner.setAngvel({ x: 0, y: 0, z: 0 }, true)
+      runner.setGravityScale(0, true)
+      runner.sleep()
+    } else {
+      runner.setGravityScale(1, true)
+      runner.wakeUp()
+    }
+  }, [body, freezeBody])
+
+  useFrame(({ clock }, delta) => {
+    const runner = body.current
+    if (!runner) return
+
+    const visual = characterFrame.current
+    visual.elapsed = clock.elapsedTime
+    visual.delta = delta
+    visual.alive = true
+    visual.escaped = escaped
+    visual.reducedMotion = reducedMotion
+    if (!active) {
+      visual.velocityX = 0
+      visual.velocityY = 0
+      visual.velocityZ = 0
+      visual.grounded = true
+      return
+    }
+
+    const linearVelocity = runner.linvel()
+    visual.velocityX = linearVelocity.x
+    visual.velocityY = linearVelocity.y
+    visual.velocityZ = linearVelocity.z
+    visual.grounded = groundContacts.current.size > 0
 
     const sensor = footSensor.current
     if (sensor) {
@@ -288,6 +365,7 @@ function PlayerRunner({
     }
 
     const position = runner.translation()
+    positionRef.current.set(position.x, position.y, position.z)
 
     if (position.y < lavaHeight + 0.35 && elapsed >= lavaGraceUntil.current && !deathCooldown.current) {
       if (heldAbility === 'extinguisher') {
@@ -328,8 +406,7 @@ function PlayerRunner({
     const speedMultiplier = elapsed < rocketUntil.current ? abilitySpec('rocket-boots').speedMultiplier : 1
     const localVelocity = movementVelocity(input, baseSpeed * speedMultiplier)
     const velocity = rotateMovementByCamera(localVelocity, cameraOrbit.current.yaw)
-    const current = runner.linvel()
-    runner.setLinvel({ x: velocity.x, y: current.y, z: velocity.z }, true)
+    runner.setLinvel({ x: velocity.x, y: linearVelocity.y, z: velocity.z }, true)
 
     if (controls.jumpQueued.current) {
       if (groundContacts.current.size > 0) {
@@ -365,11 +442,7 @@ function PlayerRunner({
         onIntersectionEnter={({ other }: IntersectionEnterPayload) => { groundContacts.current.add(other.collider.handle) }}
         onIntersectionExit={({ other }: IntersectionExitPayload) => { groundContacts.current.delete(other.collider.handle) }}
       />
-      <mesh castShadow>
-        <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
-        <meshStandardMaterial color="#f8f3ff" emissive="#5527a8" emissiveIntensity={0.55} />
-      </mesh>
-      <pointLight color="#b87cff" intensity={4} distance={3} />
+      <PlayerCharacter playerId="local-runner" isOwn frame={characterFrame} scale={0.82} />
     </RigidBody>
   )
 }
@@ -389,26 +462,44 @@ function Lava({ height }: { height: number }) {
   )
 }
 
-function RunnerBot({ elapsed, index }: { elapsed: number; index: number }) {
-  const bot = useRef<Mesh>(null)
-  const pose = botPoseAt(elapsed, index)
+function RunnerBot({ elapsed, index, reducedMotion }: { elapsed: number; index: number; reducedMotion: boolean }) {
+  const initial = useMemo(() => botPoseAt(0, index), [index])
+  const bot = useRef<Group>(null)
+  const lastElapsed = useRef(0)
+  const velocity = useRef({ x: 0, y: 0, z: 0 })
+  const frame = useRef<PlayerCharacterFrame>(createCharacterFrame({ reducedMotion }))
+  frame.current.reducedMotion = reducedMotion
 
-  useFrame(() => {
-    if (!bot.current) return
+  useFrame(({ clock }, delta) => {
+    const group = bot.current
+    if (!group) return
+    const visual = frame.current
+    visual.elapsed = clock.elapsedTime
+    visual.delta = delta
+    visual.reducedMotion = reducedMotion
+    if (elapsed === lastElapsed.current) return
+
     const next = botPoseAt(elapsed, index)
-    bot.current.position.set(next.x, next.y, next.z)
-    bot.current.rotation.y += 0.025 + index * 0.004
+    const motion = botVisualVelocity(group.position, next, elapsed - lastElapsed.current, velocity.current)
+    visual.velocityX = motion.x
+    visual.velocityY = motion.y
+    visual.velocityZ = motion.z
+    visual.grounded = Math.abs(visual.velocityY) < 0.12
+    visual.escaped = next.escaped
+    group.position.set(next.x, next.y, next.z)
+    lastElapsed.current = elapsed
   })
 
   return (
-    <mesh ref={bot} position={[pose.x, pose.y, pose.z]} castShadow>
-      <capsuleGeometry args={[0.25, 0.6, 8, 16]} />
-      <meshStandardMaterial
-        color={['#7cf7ff', '#b3ff6f', '#f6a6ff'][index]}
-        emissive={pose.escaped ? '#ff9b36' : '#164d62'}
-        emissiveIntensity={pose.escaped ? 1.5 : 0.45}
+    <group ref={bot} position={[initial.x, initial.y, initial.z]}>
+      <PlayerCharacter
+        playerId={`local-bot-${index}`}
+        isOwn={false}
+        frame={frame}
+        scale={0.74}
+        supportY={PLAYGROUND_PLATFORM_THICKNESS / 2 - 0.7}
       />
-    </mesh>
+    </group>
   )
 }
 
@@ -416,56 +507,91 @@ function NetworkAvatar({
   player,
   isOwn,
   ownPosition,
-  positions,
+  anchors,
+  reducedMotion,
+  onPose,
 }: {
   player: NetworkPlayerSnapshot
   isOwn: boolean
   ownPosition: RefObject<Vector3 | null>
-  positions: RefObject<Map<string, Vector3>>
+  anchors: PlayerCharacterAnchorRegistries
+  reducedMotion: boolean
+  onPose: (
+    playerId: string,
+    pose: PlayerCharacterPresentationState | null,
+    rescueLinkId: string,
+  ) => void
 }) {
-  const avatar = useRef<Mesh>(null)
+  const avatar = useRef<Group>(null)
   const target = useRef(new Vector3(player.x, player.y, player.z)).current
+  const smoothed = useRef(new Vector3(player.x, player.y, player.z)).current
+  const frame = useRef<PlayerCharacterFrame>(createCharacterFrame({
+    grounded: player.grounded,
+    alive: player.alive,
+    escaped: player.escaped,
+    reducedMotion,
+  }))
+  const visual = frame.current
+  visual.grounded = player.grounded
+  visual.alive = player.alive
+  visual.escaped = player.escaped
+  visual.reducedMotion = reducedMotion
+  visual.rescueRole = player.grabTargetId ? 'rescuer' : player.grabbedById ? 'target' : 'none'
 
   useEffect(() => {
     target.set(player.x, player.y, player.z)
   }, [player.x, player.y, player.z, target])
 
-  // A leaver must not leave a stale anchor behind for the rope to follow.
-  useEffect(() => {
-    const registry = positions.current
-    return () => { registry?.delete(player.id) }
-  }, [player.id, positions])
+  useFrame(({ clock }, delta) => {
+    const group = avatar.current
+    if (!group) return
+    const oldX = group.position.x
+    const oldY = group.position.y
+    const oldZ = group.position.z
+    interpolateNetworkPosition(group.position, target, 1 - Math.exp(-delta * 12), smoothed)
+    group.position.copy(smoothed)
 
-  useFrame((_, delta) => {
-    if (!avatar.current) return
-    // The server owns x/y/z; the client only smooths between authoritative patches.
-    const smoothed = interpolateNetworkPosition(
-      avatar.current.position,
-      target,
-      1 - Math.exp(-delta * 12),
-    )
-    avatar.current.position.set(smoothed.x, smoothed.y, smoothed.z)
-    positions.current?.set(player.id, avatar.current.position)
-    if (isOwn) ownPosition.current = avatar.current.position
+    const safeDelta = Number.isFinite(delta) && delta > 0 ? delta : 1 / 60
+    const deltaX = group.position.x - oldX
+    const deltaY = group.position.y - oldY
+    const deltaZ = group.position.z - oldZ
+    // A restart/spawn snap is not a 1,000 m/s run animation; keep the last heading instead.
+    const teleported = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ > 16
+    visual.elapsed = clock.elapsedTime
+    visual.delta = safeDelta
+    visual.velocityX = teleported ? 0 : deltaX / safeDelta
+    visual.velocityY = teleported ? 0 : deltaY / safeDelta
+    visual.velocityZ = teleported ? 0 : deltaZ / safeDelta
+
+    const partnerId = player.grabTargetId || player.grabbedById
+    const partner = partnerId ? anchors.root.get(partnerId) : undefined
+    const selfRoot = anchors.root.get(player.id)
+    if (partner && selfRoot) {
+      // Both points are world-space inner roots. Mixing either with the outer group position would
+      // inject the scaled boot-support offset and can invert shallow vertical rescue directions.
+      visual.rescueDirectionX = partner.x - selfRoot.x
+      visual.rescueDirectionY = partner.y - selfRoot.y
+      visual.rescueDirectionZ = partner.z - selfRoot.z
+    } else {
+      visual.rescueDirectionX = 0
+      visual.rescueDirectionY = 0
+      visual.rescueDirectionZ = -1
+    }
+    if (isOwn) ownPosition.current = group.position
   })
 
-  const color = !player.alive ? '#5a4450' : player.escaped ? '#ffcc66' : isOwn ? '#f8f3ff' : '#7cf7ff'
-  const emissive = !player.alive ? '#2a1016' : player.escaped ? '#ff8a00' : isOwn ? '#5527a8' : '#164d62'
-
   return (
-    <mesh ref={avatar} position={[player.x, player.y, player.z]} castShadow>
-      <capsuleGeometry args={[0.3, 0.84, 8, 16]} />
-      <meshStandardMaterial
-        color={color}
-        emissive={emissive}
-        emissiveIntensity={player.alive ? 0.7 : 0.2}
+    <group ref={avatar} position={[player.x, player.y, player.z]}>
+      <PlayerCharacter
+        playerId={player.id}
+        isOwn={isOwn}
+        frame={frame}
+        anchors={anchors}
+        scale={0.82}
+        rescueLinkId={player.grabTargetId || player.grabbedById}
+        onPose={onPose}
       />
-      <pointLight
-        color={isOwn ? '#b87cff' : '#7cf7ff'}
-        intensity={player.alive ? 3 : 0.6}
-        distance={2.5}
-      />
-    </mesh>
+    </group>
   )
 }
 
@@ -484,11 +610,11 @@ function NetworkAvatar({
  */
 function RescueRope({
   link,
-  positions,
+  anchors,
   reducedMotion,
 }: {
   link: RescueLinkView
-  positions: RefObject<Map<string, Vector3>>
+  anchors: PlayerCharacterAnchorRegistries
   reducedMotion: boolean
 }) {
   const resources = useMemo(() => createRescueRopeResources(), [])
@@ -511,8 +637,14 @@ function RescueRope({
   useEffect(() => () => resources.dispose(), [resources])
 
   useFrame((_, delta) => {
-    const from = positions.current?.get(link.rescuerId)
-    const to = positions.current?.get(link.targetId)
+    const from = selectRescueRopeAnchor(
+      anchors.rightGlove.get(link.rescuerId),
+      anchors.root.get(link.rescuerId),
+    )
+    const to = selectRescueRopeAnchor(
+      anchors.harness.get(link.targetId),
+      anchors.root.get(link.targetId),
+    )
     // A missing, degenerate, or non-finite pair hides the rope instead of poisoning its transform.
     const presence = rescueRopePresence(link, from, to, scratch.presence)
     resources.group.visible = presence.visible
@@ -595,6 +727,7 @@ function NetworkTower({
   active,
   rescueLinks,
   sendInput,
+  onPose,
 }: {
   players: NetworkPlayerSnapshot[]
   match: NetworkMatchSnapshot
@@ -603,10 +736,15 @@ function NetworkTower({
   active: boolean
   rescueLinks: RescueLinkView[]
   sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
+  onPose: (
+    playerId: string,
+    pose: PlayerCharacterPresentationState | null,
+    rescueLinkId: string,
+  ) => void
 }) {
   const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const ownPosition = useRef<Vector3 | null>(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
-  const avatarPositions = useRef<Map<string, Vector3>>(new Map())
+  const characterAnchors = useRef<PlayerCharacterAnchorRegistries>(createCharacterAnchorRegistries()).current
   const reducedMotion = useReducedMotion()
   useRunnerControls(controls)
 
@@ -630,7 +768,7 @@ function NetworkTower({
     <>
       <GiantPlayground elapsed={match.elapsed} event={authoritativeHellEvent()} />
       <GameCamera
-        player={null}
+        playerPosition={null}
         orbit={cameraOrbit}
         mode="network"
         elapsed={match.elapsed}
@@ -644,14 +782,16 @@ function NetworkTower({
           player={player}
           isOwn={player.id === ownPlayerId}
           ownPosition={ownPosition}
-          positions={avatarPositions}
+          anchors={characterAnchors}
+          reducedMotion={reducedMotion}
+          onPose={onPose}
         />
       ))}
       {rescueLinks.map((link) => (
         <RescueRope
           key={`${link.rescuerId}->${link.targetId}`}
           link={link}
-          positions={avatarPositions}
+          anchors={characterAnchors}
           reducedMotion={reducedMotion}
         />
       ))}
@@ -678,12 +818,12 @@ function AbilityPickup({ ability, position }: { ability: RunnerAbility; position
 }
 
 function AbilityPickups({
-  player,
+  playerPosition,
   active,
   resetToken,
   onPickup,
 }: {
-  player: RefObject<RapierRigidBody | null>
+  playerPosition: RefObject<Vector3>
   active: boolean
   resetToken: number
   onPickup: (ability: RunnerAbility) => void
@@ -699,8 +839,8 @@ function AbilityPickups({
   }, [resetToken])
 
   useFrame(() => {
-    const position = player.current?.translation()
-    if (!active || !position) return
+    if (!active) return
+    const position = playerPosition.current
     for (const pickup of ABILITY_PICKUPS) {
       if (collectedRef.current.has(pickup.ability)) continue
       const [x, y, z] = pickup.position
@@ -753,8 +893,10 @@ function Tower({
   onEscape: () => void
 }) {
   const playerBody = useRef<RapierRigidBody>(null)
+  const playerPosition = useRef(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
   const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const presentation = playerPresentation({ spectating, escaped: playerEscaped })
+  const reducedMotion = useReducedMotion()
   return (
     <>
       <GiantPlayground elapsed={elapsed} event={event} />
@@ -762,9 +904,11 @@ function Tower({
         <torusGeometry args={[1.5, 0.28, 16, 48]} />
         <meshStandardMaterial color="#ffcc66" emissive="#ff4d00" emissiveIntensity={1.4} />
       </mesh>
-      {[0, 1, 2].map((index) => <RunnerBot key={index} elapsed={elapsed} index={index} />)}
+      {[0, 1, 2].map((index) => (
+        <RunnerBot key={index} elapsed={elapsed} index={index} reducedMotion={reducedMotion} />
+      ))}
       <GameCamera
-        player={playerBody}
+        playerPosition={playerPosition}
         orbit={cameraOrbit}
         mode={presentation.cameraMode}
         elapsed={elapsed}
@@ -772,15 +916,19 @@ function Tower({
         resetToken={resetToken}
       />
       <AbilityPickups
-        player={playerBody}
+        playerPosition={playerPosition}
         active={active}
         resetToken={resetToken}
         onPickup={onPickupAbility}
       />
       <PlayerRunner
         body={playerBody}
+        positionRef={playerPosition}
         active={active}
         renderBody={presentation.renderBody}
+        freezeBody={presentation.freezeBody}
+        escaped={playerEscaped}
+        reducedMotion={reducedMotion}
         lavaHeight={lavaHeight}
         elapsed={elapsed}
         heldAbility={heldAbility}
@@ -932,6 +1080,7 @@ function NetworkGameScene({
   active,
   rescueLinks,
   sendInput,
+  onPose,
   onReady,
   onFailure,
 }: {
@@ -942,6 +1091,11 @@ function NetworkGameScene({
   active: boolean
   rescueLinks: RescueLinkView[]
   sendInput: (input: Omit<MultiplayerInputCommand, 'sequence'>) => void
+  onPose: (
+    playerId: string,
+    pose: PlayerCharacterPresentationState | null,
+    rescueLinkId: string,
+  ) => void
   onReady: () => void
   onFailure: (message: string) => void
 }) {
@@ -966,6 +1120,7 @@ function NetworkGameScene({
           active={active}
           rescueLinks={rescueLinks}
           sendInput={sendInput}
+          onPose={onPose}
         />
       </Physics>
     </Canvas>
@@ -1105,6 +1260,11 @@ function OnlineMatchHud({ hud, eliminations }: { hud: OnlineHudModel; eliminatio
   )
 }
 
+interface OnlineCharacterPoseEvidence {
+  pose: PlayerCharacterPresentationState
+  rescueLinkId: string
+}
+
 export default function HellbreakGame() {
   const [gameMode, setGameMode] = useState<'local' | 'online'>('local')
   const [started, setStarted] = useState(false)
@@ -1123,6 +1283,25 @@ export default function HellbreakGame() {
   const abilityQueued = useRef(false)
   const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued }), [])
   const network = useHellbreakRoom()
+  const [onlineCharacterPoses, setOnlineCharacterPoses] = useState<Record<string, OnlineCharacterPoseEvidence>>({})
+  const handleOnlineCharacterPose = useCallback((
+    playerId: string,
+    pose: PlayerCharacterPresentationState | null,
+    rescueLinkId: string,
+  ) => {
+    setOnlineCharacterPoses((current: Record<string, OnlineCharacterPoseEvidence>) => {
+      if (pose === null) {
+        if (!Object.prototype.hasOwnProperty.call(current, playerId)) return current
+        const next = { ...current }
+        delete next[playerId]
+        return next
+      }
+      const previous = current[playerId]
+      return previous?.pose === pose && previous.rescueLinkId === rescueLinkId
+        ? current
+        : { ...current, [playerId]: { pose, rescueLinkId } }
+    })
+  }, [])
   // Which online branches this deployment may honestly offer. Guest stays available on the static
   // Pages build; the HIVE branch stays closed until a server actually answers for it.
   const multiplayerModes = useMultiplayerModes(network.status !== 'unavailable')
@@ -1384,6 +1563,7 @@ export default function HellbreakGame() {
               active={sceneReady && onlineHud.canMove}
               rescueLinks={rescue.links}
               sendInput={network.sendInput}
+              onPose={handleOnlineCharacterPose}
               onReady={() => {
                 setSceneReady(true)
                 setSceneError(null)
@@ -1476,6 +1656,9 @@ export default function HellbreakGame() {
                 data-grabbed-by={player.grabbedById}
                 data-grip={player.grip.toFixed(2)}
                 data-grab-ack={String(player.lastAcknowledgedGrab)}
+                data-character-model={onlineCharacterPoses[player.id] ? 'infernal-climber' : undefined}
+                data-character-pose={onlineCharacterPoses[player.id]?.pose}
+                data-character-rescue-link={onlineCharacterPoses[player.id]?.rescueLinkId}
               >
                 {player.id === network.ownPlayerId ? '나' : player.id.slice(0, 4)}
                 {' · '}

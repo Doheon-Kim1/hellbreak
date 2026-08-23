@@ -144,6 +144,32 @@ can already observe—a link disappearing, or the server rescue receipt advancin
 ever being published—so the trust boundary is unchanged and a drifted mirror only makes the HUD
 optimistic for a frame.
 
+#### Infernal Climber presentation rig
+
+The capsule-only avatar has been replaced visually by an original, primitive-built HELLBREAK
+rescue climber: a compact heat suit, broad helmet and visor, chest harness/core, and long jointed
+limbs with oversized gloves and boots. It uses no external model or copied character asset. Local,
+bot, own-network, and remote-network runners all render through `PlayerCharacter.tsx`; Rapier and
+the authoritative room keep their existing capsule collision and movement dimensions underneath.
+
+Animation remains presentation-only:
+
+- `player-character-pose.ts` derives bounded idle, run, jump/fall, landing, rescuing/rescued,
+  eliminated, and escaped silhouettes from server-published state plus client-observed render
+  velocity; it reuses one mutable output and repairs non-finite inputs;
+- `player-character-style.ts` gives each session a stable accent while own, teammate, eliminated,
+  and escaped states also differ by helmet ornament and light intensity rather than hue alone;
+- the renderer mutates cached joint refs without per-frame React state and shares primitive
+  geometry/materials across climbers; reduced-motion lowers gait and bounce without removing the
+  readable rescue pose;
+- an active rope starts from the rescuer's rendered right glove and ends at the target's harness,
+  with the interpolated root as a finite fallback. These anchors are client-local vectors used only
+  to draw the rope and are removed on unmount.
+
+No joint, pose, hand position, harness position, target, force, or grip value is added to the room
+input or public schema. A modified client can change only its own animation; target selection,
+pull/lift, counter-drag, grip, cooldown, landing, and cleanup remain room-owned.
+
 ## Implemented Colyseus room adapter
 
 `src/server/hellbreak-room.ts` wraps the transport-independent simulation in a Colyseus room:

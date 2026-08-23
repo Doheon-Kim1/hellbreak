@@ -8,6 +8,7 @@ export interface PlayerPresentationInput {
 export interface PlayerPresentation {
   renderBody: boolean
   cameraMode: GameCameraMode
+  freezeBody: boolean
 }
 
 export type FramePixelSample = readonly [red: number, green: number, blue: number]
@@ -36,7 +37,10 @@ export function playerPresentation({
   escaped,
 }: PlayerPresentationInput): PlayerPresentation {
   return {
-    renderBody: !spectating && !escaped,
+    // Escaped runners stay rendered so the articulated victory silhouette can play at the exit.
+    // Spectating still removes the local Rapier body exactly as before.
+    renderBody: !spectating,
     cameraMode: spectating ? 'spectator' : 'player',
+    freezeBody: escaped && !spectating,
   }
 }

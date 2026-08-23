@@ -20,6 +20,31 @@ export interface BotPose {
   escaped: boolean
 }
 
+export interface VisualVelocity3 {
+  x: number
+  y: number
+  z: number
+}
+
+/** Writes bot presentation velocity without turning a restarted match into a teleport impulse. */
+export function botVisualVelocity(
+  previous: Pick<BotPose, 'x' | 'y' | 'z'>,
+  next: Pick<BotPose, 'x' | 'y' | 'z'>,
+  elapsedDelta: number,
+  out: VisualVelocity3,
+): VisualVelocity3 {
+  if (!Number.isFinite(elapsedDelta) || elapsedDelta <= 0) {
+    out.x = 0
+    out.y = 0
+    out.z = 0
+    return out
+  }
+  out.x = (next.x - previous.x) / elapsedDelta
+  out.y = (next.y - previous.y) / elapsedDelta
+  out.z = (next.z - previous.z) / elapsedDelta
+  return out
+}
+
 export function movementVelocity(input: MovementInput, speed: number): HorizontalVelocity {
   const x = Number(Boolean(input.right)) - Number(Boolean(input.left))
   const z = Number(Boolean(input.backward)) - Number(Boolean(input.forward))

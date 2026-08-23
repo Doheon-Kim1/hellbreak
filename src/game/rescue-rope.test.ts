@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { RESCUE_ROPE_MIN_LENGTH, rescueRopeLength, rescueRopePresence } from './rescue-rope'
+import {
+  RESCUE_ROPE_MIN_LENGTH,
+  rescueRopeLength,
+  rescueRopePresence,
+  selectRescueRopeAnchor,
+} from './rescue-rope'
+
+describe('rescue rope anchor selection', () => {
+  it('uses the articulated endpoint when it is finite', () => {
+    const glove = { x: 1, y: 2, z: 3 }
+    const root = { x: 0, y: 0, z: 0 }
+
+    expect(selectRescueRopeAnchor(glove, root)).toBe(glove)
+  })
+
+  it('falls back to the finite avatar root when a glove or harness is missing or broken', () => {
+    const root = { x: 4, y: 5, z: 6 }
+
+    expect(selectRescueRopeAnchor(undefined, root)).toBe(root)
+    expect(selectRescueRopeAnchor({ x: Number.NaN, y: 2, z: 3 }, root)).toBe(root)
+  })
+
+  it('returns undefined when neither visual anchor is safe', () => {
+    expect(selectRescueRopeAnchor(undefined, undefined)).toBeUndefined()
+    expect(selectRescueRopeAnchor(
+      { x: 0, y: Number.POSITIVE_INFINITY, z: 0 },
+      { x: Number.NaN, y: 0, z: 0 },
+    )).toBeUndefined()
+  })
+})
 
 describe('rescue rope length', () => {
   it('measures the gap between two interpolated avatar anchors', () => {

@@ -14,13 +14,27 @@ export function interpolateNetworkPosition(
   from: NetworkPosition,
   to: NetworkPosition,
   factor: number,
+  out?: NetworkPosition,
 ): NetworkPosition {
-  if (!Number.isFinite(factor)) return from
-  if (Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) > NETWORK_SNAP_DISTANCE) return to
-  const t = Math.min(1, Math.max(0, factor))
-  return {
-    x: from.x + (to.x - from.x) * t,
-    y: from.y + (to.y - from.y) * t,
-    z: from.z + (to.z - from.z) * t,
+  const deltaX = to.x - from.x
+  const deltaY = to.y - from.y
+  const deltaZ = to.z - from.z
+  const source = !Number.isFinite(factor)
+    ? from
+    : Math.hypot(deltaX, deltaY, deltaZ) > NETWORK_SNAP_DISTANCE
+      ? to
+      : null
+  if (source) {
+    if (!out) return source
+    out.x = source.x
+    out.y = source.y
+    out.z = source.z
+    return out
   }
+  const t = Math.min(1, Math.max(0, factor))
+  const result = out ?? { x: 0, y: 0, z: 0 }
+  result.x = from.x + deltaX * t
+  result.y = from.y + deltaY * t
+  result.z = from.z + deltaZ * t
+  return result
 }

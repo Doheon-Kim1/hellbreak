@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from './player-lifecycle'
-import { botPoseAt, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
+import { botPoseAt, botVisualVelocity, cycleSpectatorIndex, movementVelocity, platformPose } from './movement'
 
 describe('runner movement rules', () => {
   it('normalizes diagonal input to the configured speed', () => {
@@ -38,6 +38,15 @@ describe('player death presentation', () => {
     expect(playerPresentation({ spectating: true, escaped: false })).toEqual({
       renderBody: false,
       cameraMode: 'spectator',
+      freezeBody: false,
+    })
+  })
+
+  it('keeps an escaped runner visible for the victory pose while retaining the player camera', () => {
+    expect(playerPresentation({ spectating: false, escaped: true })).toEqual({
+      renderBody: true,
+      cameraMode: 'player',
+      freezeBody: true,
     })
   })
 
@@ -54,6 +63,17 @@ describe('player death presentation', () => {
 })
 
 describe('runner bot route', () => {
+  it('reports no synthetic motion when a restarted match rewinds elapsed time', () => {
+    const out = { x: 9, y: 9, z: 9 }
+    expect(botVisualVelocity(
+      { x: 8, y: 7, z: 6 },
+      { x: -26, y: -2.5, z: 22 },
+      -32,
+      out,
+    )).toBe(out)
+    expect(out).toEqual({ x: 0, y: 0, z: 0 })
+  })
+
   it('rests on the platform instead of floating between jumps', () => {
     const platform = platformPose(0)
     const start = botPoseAt(0, 0)
