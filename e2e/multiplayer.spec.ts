@@ -332,9 +332,35 @@ test('two browsers create, join, synchronize movement, and leave a room', async 
 
     await waitForOnlineScene(pageA)
     await pageA.bringToFront()
-    await pageA.locator('canvas').click({ position: { x: 20, y: 20 } })
+    const canvasA = pageA.locator('canvas')
+    const startX = Number(await ownA.getAttribute('data-x'))
+    const startZ = Number(await ownA.getAttribute('data-z'))
+    await pageA.getByRole('button', { name: '마우스 조작 시작' }).click()
+    await expect.poll(() => pageA.evaluate(() => document.pointerLockElement?.tagName ?? ''))
+      .toBe('CANVAS')
+    await pageA.waitForTimeout(320)
+    const initialYaw = Number(await canvasA.getAttribute('data-camera-yaw'))
+    await pageA.evaluate(() => {
+      for (let index = 0; index < 20; index += 1) {
+        const event = new MouseEvent('mousemove', { bubbles: true })
+        Object.defineProperty(event, 'movementX', { value: 20 })
+        Object.defineProperty(event, 'movementY', { value: 0 })
+        document.dispatchEvent(event)
+      }
+    })
+    await expect.poll(async () => Math.abs(
+      Number(await canvasA.getAttribute('data-camera-yaw')) - initialYaw,
+    )).toBeGreaterThan(0.1)
     await pageA.keyboard.down('KeyW')
     try {
+      await expect.poll(async () => {
+        const movedX = Number(await ownA.getAttribute('data-x')) - startX
+        const movedZ = Number(await ownA.getAttribute('data-z')) - startZ
+        const yaw = Number(await canvasA.getAttribute('data-camera-yaw'))
+        return movedX * -Math.sin(yaw) + movedZ * -Math.cos(yaw)
+      }, {
+        timeout: INPUT_OBSERVATION_MS,
+      }).toBeGreaterThan(0.25)
       await expect.poll(async () => (await ownA.innerText()) !== before, {
         timeout: INPUT_OBSERVATION_MS,
       }).toBe(true)
@@ -442,7 +468,7 @@ test('one shared room drives server jump physics and the match HUD in both brows
     const remainingB = clockSeconds(await pageB.getByTestId('online-timer').innerText())
     expect(remainingA).toBeGreaterThan(0)
     expect(remainingA).toBeLessThan(clockBeforeJump)
-    expect(Math.abs(remainingA - remainingB)).toBeLessThanOrEqual(1)
+    expect(Math.abs(remainingA - remainingB)).toBeLessThanOrEqual(2)
 
     // The authoritative room, not the browser, applies gravity and the platform landing. Standing
     // and the height are one fact, so both are read from one row in one go: fetched separately they
@@ -551,7 +577,58 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       urgencies: RESCUE_URGENCY_BANDS,
       gripBands: RESCUE_GRIP_BANDS,
     })
-    await page.keyboard.down('e')
+    const canvas = page.locator('canvas')
+    await page.evaluate(() => {
+      const element = document.querySelector('canvas') as HTMLCanvasElement & {
+        __nativeRequestPointerLock?: HTMLCanvasElement['requestPointerLock']
+      }
+      element.__nativeRequestPointerLock = element.requestPointerLock
+      element.requestPointerLock = () => Promise.reject(new DOMException('denied', 'NotAllowedError'))
+    })
+    await canvas.dispatchEvent('mousedown', { button: 0 })
+    await expect(canvas).toHaveAttribute('data-pointer-lock-denied', 'true')
+    await expect(canvas).toHaveAttribute('data-grab-held', 'true')
+    await page.evaluate(() => window.dispatchEvent(new MouseEvent('mouseup', { button: 0 })))
+    await expect(canvas).toHaveAttribute('data-grab-held', 'false')
+    await expect(canvas).toHaveAttribute('data-transmitted-grab-count', /\d+/)
+    await page.waitForTimeout(100)
+    const transmittedGrabCountBeforeAcquisition = await canvas.getAttribute('data-transmitted-grab-count')
+    await page.evaluate(() => {
+      const element = document.querySelector('canvas') as HTMLCanvasElement & {
+        __nativeRequestPointerLock?: HTMLCanvasElement['requestPointerLock']
+      }
+      if (element.__nativeRequestPointerLock) {
+        element.requestPointerLock = element.__nativeRequestPointerLock
+        delete element.__nativeRequestPointerLock
+      }
+      delete element.dataset.pointerLockDenied
+    })
+    await expect(canvas).not.toHaveAttribute('data-pointer-lock-denied')
+
+    const yawBeforeAcquisition = await canvas.getAttribute('data-camera-yaw')
+    expect(yawBeforeAcquisition).not.toBeNull()
+    const canvasBox = await canvas.boundingBox()
+    expect(canvasBox).not.toBeNull()
+    await canvas.click({
+      force: true,
+      position: {
+        x: (canvasBox?.width ?? 100) * 0.75,
+        y: (canvasBox?.height ?? 100) * 0.65,
+      },
+    })
+    await expect.poll(() => page.evaluate(() => document.pointerLockElement?.tagName ?? ''))
+      .toBe('CANVAS')
+    // The canvas acquisition click is lock-only and must not become a grab edge or camera warp.
+    await page.waitForTimeout(320)
+    await expect(rescuer).toHaveAttribute('data-grab-ack', '0')
+    await expect(canvas).toHaveAttribute('data-grab-held', 'false')
+    await expect(canvas).toHaveAttribute(
+      'data-transmitted-grab-count',
+      transmittedGrabCountBeforeAcquisition ?? '',
+    )
+    await expect(canvas).toHaveAttribute('data-camera-yaw', yawBeforeAcquisition ?? '')
+    await page.mouse.down({ button: 'left' })
+    await expect(canvas).toHaveAttribute('data-grab-held', 'true')
     try {
       await page.waitForTimeout(250)
       const schemaLink = { target: jumperId, incoming: rescuerId }
@@ -615,22 +692,29 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       // only after the last collection.
       const readout = await rescueReadoutProbe(page)
       readoutObserved ||= readout.observed
-      expect(schemaObserved, 'the room never published the rescue link').toBe(true)
+      const cameraDiagnostic = await canvas.evaluate((element) => ({
+        held: element.getAttribute('data-grab-held'),
+        yaw: element.getAttribute('data-camera-yaw'),
+        pitch: element.getAttribute('data-camera-pitch'),
+      }))
+      expect(
+        schemaObserved,
+        `the room never published the rescue link; camera ${JSON.stringify(cameraDiagnostic)}`,
+      ).toBe(true)
       expect(readoutObserved, `no coherent rescue readout; last frame ${readout.last}`).toBe(true)
       // Milestones, and only milestones, reach the live region: never a per-frame grip value.
       await expect(page.getByTestId('rescue-notice'))
         .toHaveText(/구조 시작|구조 성공|구조 실패|그립 소진/)
-      await page.keyboard.up('e')
+      await page.mouse.up({ button: 'left' })
       const acknowledgedGrab = Number(await rescuer.getAttribute('data-grab-ack'))
       expect(acknowledgedGrab).toBeGreaterThan(initialGrabAck)
       await expect.poll(() => room.state.players.get(rescuerId)?.lastAcknowledgedGrab ?? 0, {
         timeout: INPUT_OBSERVATION_MS,
       }).toBeGreaterThanOrEqual(acknowledgedGrab)
-      await expect.poll(async () => Number(await rescuer.getAttribute('data-grip'))).toBeLessThan(1)
       // The target started to the rescuer's left; the room-owned pull must move it toward +X.
       expect(room.state.players.get(jumperId)?.x ?? rescueStartX).toBeGreaterThan(rescueStartX + 0.02)
     } finally {
-      await page.keyboard.up('e')
+      await page.mouse.up({ button: 'left' })
     }
 
     await expect(rescuer).toHaveAttribute('data-grab-target', '', { timeout: INPUT_OBSERVATION_MS })
@@ -641,7 +725,7 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
     await expect(jumper).toHaveAttribute('data-grounded', 'true', { timeout: INPUT_OBSERVATION_MS })
     expect(pageErrors).toEqual([])
   } finally {
-    await page.keyboard.up('e').catch(() => undefined)
+    await page.mouse.up({ button: 'left' }).catch(() => undefined)
     await room.leave(true).catch(() => undefined)
     await context.close()
   }

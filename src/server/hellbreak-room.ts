@@ -195,6 +195,7 @@ export class HellbreakRoom extends Room<{
       publicPlayer.lastAcknowledgedJump = player.lastAcknowledgedJump
       publicPlayer.grabTargetId = player.grabTargetId
       publicPlayer.grabbedById = player.grabbedById
+      publicPlayer.structureGripAnchorId = player.structureGripAnchorId
       publicPlayer.grip = player.grip
       publicPlayer.lastAcknowledgedGrab = player.lastAcknowledgedGrab
     }

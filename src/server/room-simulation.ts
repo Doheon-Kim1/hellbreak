@@ -1,12 +1,16 @@
-import { rotateMovementByCamera } from '../game/camera'
+import { MAX_CAMERA_PITCH, MIN_CAMERA_PITCH, rotateMovementByCamera } from '../game/camera'
 import { movementVelocity } from '../game/movement'
+import { gripAnchorById, playgroundGripAnchors } from '../game/grip-anchors'
+import type { GripAnchor } from '../game/grip-anchors'
 import { lavaStateAt } from '../game/match'
 import type { LavaPhase, MatchPhase, MatchWinner } from '../game/match'
 import {
   PLAYGROUND_HALF_EXTENT,
+  PLAYGROUND_PLATFORM_THICKNESS,
   coversPoint,
   finalPlatformSurface,
   platformSurface,
+  playgroundSurfaces,
   supportTopBelow,
 } from '../game/playground'
 import { RESCUE_BALANCE, rescueConeCos } from './rescue-balance'
@@ -19,9 +23,10 @@ export interface PlayerInputCommand {
   right?: boolean
   sprint?: boolean
   jump?: boolean
-  /** Held rescue intent. The client may only say "I am holding E", never who it wants to pull. */
+  /** Held rescue/grip intent. The client never names the target. */
   grab?: boolean
   cameraYaw?: number
+  cameraPitch?: number
 }
 
 export interface RoomPlayerState {
@@ -44,6 +49,8 @@ export interface RoomPlayerState {
   grabTargetId: string
   /** Derived every tick from the outgoing links, never accepted from a client. */
   grabbedById: string
+  /** Server-selected static route ledge; empty when not holding structure. */
+  structureGripAnchorId: string
   /** Server-private feet height of the target when the link was created, for landing gain. */
   grabStartFeetY: number
   /** Normalized 0..1 rescue grip. */
@@ -85,6 +92,7 @@ export interface PublicRoomPlayerSnapshot {
   lastAcknowledgedJump: number
   grabTargetId: string
   grabbedById: string
+  structureGripAnchorId: string
   grip: number
   lastAcknowledgedGrab: number
 }
@@ -120,6 +128,19 @@ const LANDING_EPSILON = 0.01
 const RESCUE = RESCUE_BALANCE
 /** Broad forward cone derived from the server-validated camera yaw. */
 const RESCUE_CONE_COS = rescueConeCos()
+
+const STRUCTURE_GRIP = Object.freeze({
+  reach: 1.65,
+  breakRange: 2.2,
+  coneDegrees: 42,
+  hangSpeed: 5,
+  mantleSpeed: 4.2,
+  maxStep: 0.28,
+  gripDrainPerSecond: 0.14,
+  releaseCooldown: 0.65,
+  exhaustionCooldown: 3,
+})
+const STRUCTURE_GRIP_CONE_COS = Math.cos((STRUCTURE_GRIP.coneDegrees * Math.PI) / 180)
 
 /** Half the rendered capsule height, so `y` is the avatar centre and `y - half` its feet. */
 export const PLAYER_HALF_HEIGHT = 0.72
@@ -158,6 +179,10 @@ function availableSpawnSlot(room: AuthoritativeRoomState): number {
 function normalizeYaw(yaw: number): number {
   const fullTurn = Math.PI * 2
   return ((yaw + Math.PI) % fullTurn + fullTurn) % fullTurn - Math.PI
+}
+
+function clampCameraPitch(pitch: number): number {
+  return Math.min(MAX_CAMERA_PITCH, Math.max(MIN_CAMERA_PITCH, pitch))
 }
 
 export interface RoomOptions {
@@ -199,13 +224,14 @@ function spawnedPlayer(spawnSlot: number, previous?: RoomPlayerState): RoomPlaye
     lastAcknowledgedJump: 0,
     grabTargetId: '',
     grabbedById: '',
+    structureGripAnchorId: '',
     grabStartFeetY: 0,
     grip: 1,
     grabCooldownUntil: 0,
     lastAcknowledgedGrab: 0,
     spawnSlot,
     lastSequence: previous?.lastSequence ?? 0,
-    input: { sequence: previous?.lastSequence ?? 0, cameraYaw: 0 },
+    input: { sequence: previous?.lastSequence ?? 0, cameraYaw: 0, cameraPitch: 0 },
   }
 }
 
@@ -299,6 +325,7 @@ export function applyPlayerInput(
     || input.sequence <= player.lastSequence
     || controls.some((value) => value !== undefined && typeof value !== 'boolean')
     || (input.cameraYaw !== undefined && !Number.isFinite(input.cameraYaw))
+    || (input.cameraPitch !== undefined && !Number.isFinite(input.cameraPitch))
   ) return room
 
   const command: PlayerInputCommand = {
@@ -311,6 +338,7 @@ export function applyPlayerInput(
     jump: input.jump ?? false,
     grab: input.grab ?? false,
     cameraYaw: normalizeYaw(input.cameraYaw ?? 0),
+    cameraPitch: clampCameraPitch(input.cameraPitch ?? 0),
   }
 
   // Only a false→true transition arms a jump, so a held button cannot buffer repeated takeoffs.
@@ -337,7 +365,9 @@ function clampToWorld(value: number): number {
 }
 
 function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState {
-  const baseSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
+  const requestedSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
+  // W becomes mantle intent while holding structure; ordinary travel must not outrun the constraint.
+  const baseSpeed = player.structureGripAnchorId === '' ? requestedSpeed : 0
   // Holding a teammate costs footing, so a rescuer walks slower until the link ends.
   const speed = player.grabTargetId === '' ? baseSpeed : baseSpeed * RESCUE.speedScale
   const localVelocity = movementVelocity(player.input, speed)
@@ -373,21 +403,27 @@ function rescueDistance(rescuer: RoomPlayerState, target: RoomPlayerState): numb
   return Math.hypot(target.x - rescuer.x, target.y - rescuer.y, target.z - rescuer.z)
 }
 
-/** True while the teammate sits inside the broad forward cone of the validated camera yaw. */
+/** True while the teammate sits inside the broad 3D cone of validated camera yaw and pitch. */
 function insideRescueCone(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
   const dx = target.x - rescuer.x
+  const dy = target.y - rescuer.y
   const dz = target.z - rescuer.z
-  const horizontal = Math.hypot(dx, dz)
-  // Someone hanging straight overhead or underfoot has no yaw to compare against.
-  if (horizontal < 1e-6) return true
-  const forward = rotateMovementByCamera({ x: 0, z: -1 }, rescuer.input.cameraYaw ?? 0)
-  return (dx * forward.x + dz * forward.z) / horizontal >= RESCUE_CONE_COS
+  const distance = Math.hypot(dx, dy, dz)
+  if (distance < 1e-6) return true
+  const yaw = rescuer.input.cameraYaw ?? 0
+  const pitch = rescuer.input.cameraPitch ?? 0
+  const horizontal = Math.cos(pitch)
+  const forwardX = -Math.sin(yaw) * horizontal
+  const forwardY = Math.sin(pitch)
+  const forwardZ = -Math.cos(yaw) * horizontal
+  return (dx * forwardX + dy * forwardY + dz * forwardZ) / distance >= RESCUE_CONE_COS
 }
 
 function canHoldRescue(rescuer: RoomPlayerState): boolean {
   return rescuer.alive
     && !rescuer.escaped
     && rescuer.grounded
+    && rescuer.structureGripAnchorId === ''
     && rescuer.input.grab === true
     && rescuer.grip > 0
 }
@@ -404,6 +440,7 @@ function linkSurvives(rescuer: RoomPlayerState, target: RoomPlayerState): boolea
 function isRescueCandidate(rescuer: RoomPlayerState, target: RoomPlayerState): boolean {
   return target.alive
     && !target.escaped
+    && target.structureGripAnchorId === ''
     && (!target.grounded || target.y <= rescuer.y - RESCUE.minDrop)
     && rescueDistance(rescuer, target) <= RESCUE.reach
     && insideRescueCone(rescuer, target)
@@ -598,6 +635,250 @@ function commitRescueLinks(
   }))
 }
 
+function segmentHitsPlatformBeforeAnchor(
+  fromX: number,
+  fromY: number,
+  fromZ: number,
+  toX: number,
+  toY: number,
+  toZ: number,
+): boolean {
+  const dx = toX - fromX
+  const dy = toY - fromY
+  const dz = toZ - fromZ
+  const epsilon = 1e-7
+
+  for (const surface of playgroundSurfaces()) {
+    let near = 0
+    let far = 1
+    const minY = surface.top - PLAYGROUND_PLATFORM_THICKNESS
+
+    if (Math.abs(dx) < epsilon) {
+      if (fromX < surface.minX || fromX > surface.maxX) continue
+    } else {
+      const first = (surface.minX - fromX) / dx
+      const second = (surface.maxX - fromX) / dx
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+    if (Math.abs(dy) < epsilon) {
+      if (fromY < minY || fromY > surface.top) continue
+    } else {
+      const first = (minY - fromY) / dy
+      const second = (surface.top - fromY) / dy
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+    if (Math.abs(dz) < epsilon) {
+      if (fromZ < surface.minZ || fromZ > surface.maxZ) continue
+    } else {
+      const first = (surface.minZ - fromZ) / dz
+      const second = (surface.maxZ - fromZ) / dz
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+
+    if (far > epsilon && near < 1 - epsilon) return true
+  }
+  return false
+}
+
+function structureAimDot(player: RoomPlayerState, anchor: GripAnchor): number {
+  const originY = player.y + 0.25
+  const dx = anchor.x - player.x
+  const dy = anchor.y - originY
+  const dz = anchor.z - player.z
+  const distance = Math.hypot(dx, dy, dz)
+  if (distance < 1e-6) return 1
+  const yaw = player.input.cameraYaw ?? 0
+  const pitch = player.input.cameraPitch ?? 0
+  const horizontal = Math.cos(pitch)
+  const forwardX = -Math.sin(yaw) * horizontal
+  const forwardY = Math.sin(pitch)
+  const forwardZ = -Math.cos(yaw) * horizontal
+  return (dx * forwardX + dy * forwardY + dz * forwardZ) / distance
+}
+
+function structureGripDistance(player: RoomPlayerState, anchor: GripAnchor): number {
+  return Math.hypot(anchor.x - player.x, anchor.y - (player.y + 0.25), anchor.z - player.z)
+}
+
+function structureCandidate(player: RoomPlayerState, anchor: GripAnchor): boolean {
+  const facingSide = (player.x - anchor.x) * anchor.normalX + (player.z - anchor.z) * anchor.normalZ
+  return structureGripDistance(player, anchor) <= STRUCTURE_GRIP.reach
+    && structureAimDot(player, anchor) >= STRUCTURE_GRIP_CONE_COS
+    && facingSide >= -0.05
+    && !segmentHitsPlatformBeforeAnchor(
+      player.x,
+      player.y + 0.25,
+      player.z,
+      anchor.x,
+      anchor.y,
+      anchor.z,
+    )
+}
+
+interface StructureGripResolution {
+  holds: Map<string, string>
+  created: Set<string>
+  ended: Set<string>
+}
+
+function resolveStructureGrips(
+  players: Record<string, RoomPlayerState>,
+  rescueLinks: ReadonlyMap<string, string>,
+  elapsed: number,
+): StructureGripResolution {
+  const holds = new Map<string, string>()
+  const created = new Set<string>()
+  const ended = new Set<string>()
+  const rescueBusy = new Set<string>()
+  for (const [rescuerId, targetId] of rescueLinks) {
+    rescueBusy.add(rescuerId)
+    rescueBusy.add(targetId)
+  }
+
+  const ids = Object.keys(players).sort()
+  for (const id of ids) {
+    const player = players[id]
+    const existing = gripAnchorById(player.structureGripAnchorId)
+    const eligible = player.alive
+      && !player.escaped
+      && !player.grounded
+      && player.input.grab === true
+      && player.grip > 0
+      && !rescueBusy.has(id)
+
+    if (existing) {
+      if (eligible && structureGripDistance(player, existing) <= STRUCTURE_GRIP.breakRange) {
+        holds.set(id, existing.id)
+      } else {
+        ended.add(id)
+      }
+      continue
+    }
+
+    if (
+      !eligible
+      || player.structureGripAnchorId !== ''
+      || player.grabTargetId !== ''
+      || player.grabbedById !== ''
+      || elapsed < player.grabCooldownUntil
+    ) continue
+
+    let best: GripAnchor | null = null
+    let bestDot = -Infinity
+    let bestDistance = Infinity
+    for (const anchor of playgroundGripAnchors()) {
+      if (!structureCandidate(player, anchor)) continue
+      const dot = structureAimDot(player, anchor)
+      const distance = structureGripDistance(player, anchor)
+      if (
+        dot > bestDot + 1e-9
+        || (Math.abs(dot - bestDot) <= 1e-9 && distance < bestDistance - 1e-9)
+        || (Math.abs(dot - bestDot) <= 1e-9 && Math.abs(distance - bestDistance) <= 1e-9
+          && (best === null || anchor.id.localeCompare(best.id) < 0))
+      ) {
+        best = anchor
+        bestDot = dot
+        bestDistance = distance
+      }
+    }
+    if (best) {
+      holds.set(id, best.id)
+      created.add(id)
+    }
+  }
+
+  return { holds, created, ended }
+}
+
+function moveToward(value: number, target: number, ratio: number): number {
+  return value + (target - value) * ratio
+}
+
+function applyStructureGripForces(
+  players: Record<string, RoomPlayerState>,
+  holds: Map<string, string>,
+  completed: Set<string>,
+  delta: number,
+): void {
+  for (const [id, anchorId] of holds) {
+    const player = players[id]
+    const anchor = gripAnchorById(anchorId)
+    if (!anchor) {
+      holds.delete(id)
+      continue
+    }
+    const mantling = player.input.forward === true
+    const targetX = mantling ? anchor.mantleX : anchor.hangX
+    const targetY = mantling ? anchor.mantleY : anchor.hangY
+    const targetZ = mantling ? anchor.mantleZ : anchor.hangZ
+    const dx = targetX - player.x
+    const dy = targetY - player.y
+    const dz = targetZ - player.z
+    const distance = Math.hypot(dx, dy, dz)
+    const maxStep = Math.min(
+      STRUCTURE_GRIP.maxStep,
+      (mantling ? STRUCTURE_GRIP.mantleSpeed : STRUCTURE_GRIP.hangSpeed) * delta,
+    )
+
+    if (mantling && distance <= maxStep + 0.03) {
+      players[id] = {
+        ...player,
+        x: targetX,
+        y: targetY,
+        z: targetZ,
+        velocityY: 0,
+        grounded: true,
+      }
+      holds.delete(id)
+      completed.add(id)
+      continue
+    }
+
+    const ratio = distance <= 1e-6 ? 1 : Math.min(1, maxStep / distance)
+    players[id] = {
+      ...player,
+      x: clampToWorld(moveToward(player.x, targetX, ratio)),
+      y: moveToward(player.y, targetY, ratio),
+      z: clampToWorld(moveToward(player.z, targetZ, ratio)),
+      velocityY: 0,
+      grounded: false,
+    }
+  }
+}
+
+function commitStructureGrips(
+  players: Record<string, RoomPlayerState>,
+  holds: ReadonlyMap<string, string>,
+  created: ReadonlySet<string>,
+  ended: ReadonlySet<string>,
+  completed: ReadonlySet<string>,
+  exhausted: ReadonlySet<string>,
+  elapsed: number,
+  phase: MatchPhase,
+): Record<string, RoomPlayerState> {
+  return Object.fromEntries(Object.entries(players).map(([id, player]) => {
+    const requested = phase === 'finished' || !player.alive || player.escaped ? '' : holds.get(id) ?? ''
+    const acknowledged = created.has(id)
+    const failed = ended.has(id) || (acknowledged && requested === '' && !completed.has(id))
+    return [id, {
+      ...player,
+      structureGripAnchorId: requested,
+      lastAcknowledgedGrab: acknowledged ? player.lastSequence : player.lastAcknowledgedGrab,
+      grabCooldownUntil: exhausted.has(id)
+        ? Math.max(player.grabCooldownUntil, elapsed + STRUCTURE_GRIP.exhaustionCooldown)
+        : failed
+          ? Math.max(player.grabCooldownUntil, elapsed + STRUCTURE_GRIP.releaseCooldown)
+          : player.grabCooldownUntil,
+    }] as const
+  }))
+}
+
 function drownedInLava(player: RoomPlayerState, lavaHeight: number): boolean {
   return player.y < lavaHeight + LAVA_LETHAL_MARGIN
 }
@@ -624,12 +905,15 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
       : advancePlayer(player, delta)
   }
 
-  // 3-5. Break invalidated links, then resolve new ones deterministically.
+  // 3-5. Break invalidated player links, then resolve new ones deterministically.
   const { links, created } = resolveRescueLinks(advanced, elapsed)
+  const structure = resolveStructureGrips(advanced, links, elapsed)
+  const completedStructureGrips = new Set<string>()
 
-  // 6-7. One rescue force per target and one counter-drag per rescuer, then re-resolve support.
+  // 6-7. Apply one authoritative effect for each mutually-exclusive hold.
   const panicking = panickingRescuers(advanced, links, lava.height)
   applyRescueForces(advanced, links, panicking, delta)
+  applyStructureGripForces(advanced, structure.holds, completedStructureGrips, delta)
 
   // 9. End a link in the same tick when its target lands or counter-drag costs the rescuer their
   // footing. A standing teammate cannot be dragged, and an airborne rescuer cannot hold anyone.
@@ -637,18 +921,23 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
     if (!advanced[rescuerId].grounded || advanced[targetId].grounded) links.delete(rescuerId)
   }
 
-  // 8. Grip drains while linked and only regenerates on solid ground without a link.
+  // 8. Grip drains for either hold type and regenerates only while unsupported by neither.
   const exhausted = new Set<string>()
   for (const [id, player] of Object.entries(advanced)) {
-    const linked = links.has(id)
-    const drain = RESCUE.gripDrainPerSecond * (panicking.has(id) ? RESCUE.panicDrainMultiplier : 1)
+    const rescueLinked = links.has(id)
+    const structureLinked = structure.holds.has(id)
+    const linked = rescueLinked || structureLinked
+    const drain = rescueLinked
+      ? RESCUE.gripDrainPerSecond * (panicking.has(id) ? RESCUE.panicDrainMultiplier : 1)
+      : STRUCTURE_GRIP.gripDrainPerSecond
     const grip = linked
       ? player.grip - drain * delta
       : player.grounded ? player.grip + RESCUE.gripRegenPerSecond * delta : player.grip
     advanced[id] = { ...player, grip: Math.min(1, Math.max(0, grip)) }
-    // Exhausted grip drops the link inside the same tick that emptied it.
+    // Exhausted grip drops whichever hold emptied it inside this same tick.
     if (linked && advanced[id].grip <= 0) {
       links.delete(id)
+      structure.holds.delete(id)
       exhausted.add(id)
     }
   }
@@ -683,6 +972,16 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
   const phase: MatchPhase = winner !== null
     ? 'finished'
     : elapsed >= room.durationSeconds ? 'final-escape' : 'running'
+  const structuredPlayers = commitStructureGrips(
+    players,
+    structure.holds,
+    structure.created,
+    structure.ended,
+    completedStructureGrips,
+    exhausted,
+    elapsed,
+    phase,
+  )
 
   return {
     ...room,
@@ -692,7 +991,7 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
     phase,
     winner,
     eliminations,
-    players: commitRescueLinks(players, links, created, exhausted, elapsed, phase),
+    players: commitRescueLinks(structuredPlayers, links, created, exhausted, elapsed, phase),
   }
 }
 
@@ -718,6 +1017,7 @@ export function publicRoomSnapshot(room: AuthoritativeRoomState): PublicRoomSnap
       lastAcknowledgedJump: player.lastAcknowledgedJump,
       grabTargetId: player.grabTargetId,
       grabbedById: player.grabbedById,
+      structureGripAnchorId: player.structureGripAnchorId,
       grip: player.grip,
       lastAcknowledgedGrab: player.lastAcknowledgedGrab,
     }])),

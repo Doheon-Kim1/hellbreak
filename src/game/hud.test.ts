@@ -36,6 +36,7 @@ function runner(overrides: Partial<NetworkPlayerSnapshot> = {}): NetworkPlayerSn
     lastAcknowledgedJump: 0,
     grabTargetId: '',
     grabbedById: '',
+    structureGripAnchorId: '',
     grip: 1,
     lastAcknowledgedGrab: 0,
     ...overrides,
@@ -356,6 +357,21 @@ describe('rescue HUD model', () => {
     )
     expect(quiet.outcome).toBeNull()
     expect(quiet.announcement).toBeNull()
+  })
+
+  it('shows a server-owned structure hold without inventing a failed player rescue', () => {
+    const previous = memory({ acknowledgedGrab: 4 })
+    const model = rescueHudModel([
+      runner({ structureGripAnchorId: 'route-4-south-0', grip: 0.72, lastAcknowledgedGrab: 5 }),
+    ], 'own', -4, previous, 10)
+
+    expect(model.state).toBe('holding')
+    expect(model.linked).toBe(false)
+    expect(model.showGrip).toBe(true)
+    expect(model.gripPercent).toBe(72)
+    expect(model.statusLabel).toContain('구조물 그립')
+    expect(model.outcome).toBeNull()
+    expect(model.announcement).toBeNull()
   })
 
   it('claims exhaustion only when the published grip really did reach empty', () => {

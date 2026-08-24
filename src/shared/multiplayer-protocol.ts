@@ -39,6 +39,7 @@ export interface MultiplayerInputCommand {
    */
   grab: boolean
   cameraYaw: number
+  cameraPitch: number
 }
 
 export interface NetworkPlayerSnapshot {
@@ -57,7 +58,9 @@ export interface NetworkPlayerSnapshot {
   grabTargetId: string
   /** Player pulling this runner up; empty when not being rescued. */
   grabbedById: string
-  /** Normalized 0..1 rescue grip. */
+  /** Server-selected static route ledge; empty when not holding structure. */
+  structureGripAnchorId: string
+  /** Normalized 0..1 rescue or structure grip. */
   grip: number
   /** Sequence of the last input the server turned into a rescue link; 0 before any link. */
   lastAcknowledgedGrab: number

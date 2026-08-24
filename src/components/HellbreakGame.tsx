@@ -7,7 +7,16 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState } from 're
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Matrix4, Quaternion, Vector3 } from 'three'
 import type { Group, Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
-import { DEFAULT_CAMERA_ORBIT, cameraOrbitOffset, rotateMovementByCamera, updateCameraOrbit } from '../game/camera'
+import {
+  DEFAULT_CAMERA_ORBIT,
+  MAX_POINTER_LOOK_DELTA,
+  cameraAimDirection,
+  cameraOrbitOffset,
+  isUsableInitialPointerLookDelta,
+  requestPointerLockSafely,
+  rotateMovementByCamera,
+  updateCameraOrbitInPlace,
+} from '../game/camera'
 import type { CameraOrbit } from '../game/camera'
 import { createRunnerControlSources, readRunnerInput, setRunnerControlSource } from '../game/controls'
 import type { RunnerControl, RunnerControlSources } from '../game/controls'
@@ -28,6 +37,7 @@ import {
 import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { PLAYGROUND_PLATFORM_THICKNESS } from '../game/playground'
+import { gripAnchorById } from '../game/grip-anchors'
 import { interpolateNetworkPosition } from '../network/interpolation'
 import { roomPhaseLabel } from '../network/room-connection'
 import { useHellbreakRoom } from '../network/use-hellbreak-room'
@@ -169,6 +179,8 @@ function useReducedMotion() {
 function GameCamera({
   playerPosition,
   orbit,
+  controls,
+  active,
   mode,
   elapsed,
   spectatorIndex,
@@ -177,6 +189,8 @@ function GameCamera({
 }: {
   playerPosition: RefObject<Vector3> | null
   orbit: RefObject<CameraOrbit>
+  controls: RunnerControls
+  active: boolean
   mode: 'player' | 'spectator' | 'network'
   elapsed: number
   spectatorIndex: number
@@ -186,6 +200,7 @@ function GameCamera({
   const { camera, gl } = useThree()
   const desired = useMemo(() => new Vector3(), [])
   const lookAt = useMemo(() => new Vector3(), [])
+  const aimDirection = useMemo(() => new Vector3(), [])
 
   useEffect(() => {
     orbit.current = { ...DEFAULT_CAMERA_ORBIT }
@@ -195,63 +210,195 @@ function GameCamera({
     if (mode === 'spectator') return
     const canvas = gl.domElement
     let drag: { pointerId: number; x: number; y: number } | null = null
+    let mouseDrag: { x: number; y: number } | null = null
+    let pointerLookCalibrated = true
+    let cameraResetPendingGrab = false
+    let primaryMouseDown = false
 
+    const setMouseGrab = (pressed: boolean) => {
+      const held = active && pressed
+      controls.input.current = setRunnerControlSource(
+        controls.input.current,
+        'rescue',
+        'mouse:primary',
+        held,
+      )
+      canvas.dataset.grabHeld = String(held)
+    }
+    const clearMouseGrab = () => setMouseGrab(false)
+    const clearMouseInput = () => {
+      primaryMouseDown = false
+      mouseDrag = null
+      clearMouseGrab()
+    }
+    const applyLookDelta = (deltaX: number, deltaY: number, zoomDelta = 0) => {
+      updateCameraOrbitInPlace(orbit.current, { deltaX, deltaY, zoomDelta })
+      canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
+      canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
+    }
     const endDrag = (event: PointerEvent) => {
       if (drag?.pointerId !== event.pointerId) return
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
       drag = null
     }
     const onPointerDown = (event: PointerEvent) => {
-      if (event.button !== 0 || !event.isPrimary) return
+      if (!active || !event.isPrimary || event.pointerType === 'mouse') return
       drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
       canvas.setPointerCapture(event.pointerId)
+    }
+    const onMouseDown = (event: MouseEvent) => {
+      if (!active) return
+      if (event.button === 0) {
+        primaryMouseDown = true
+        if (document.pointerLockElement === canvas) {
+          if (cameraResetPendingGrab) {
+            orbit.current.yaw = DEFAULT_CAMERA_ORBIT.yaw
+            orbit.current.pitch = DEFAULT_CAMERA_ORBIT.pitch
+            cameraResetPendingGrab = false
+            canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
+            canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
+          }
+          setMouseGrab(true)
+        } else if (
+          canvas.dataset.pointerLockDenied === 'true'
+          || typeof canvas.requestPointerLock !== 'function'
+        ) {
+          // Permission-denied and unsupported browsers retain left-grab plus right-drag look.
+          setMouseGrab(true)
+        } else {
+          // The acquisition gesture is focus-only. Grabbing begins on the next locked press.
+          void requestPointerLockSafely(
+            () => canvas.requestPointerLock(),
+            () => {
+              canvas.dataset.pointerLockDenied = 'true'
+              if (primaryMouseDown) setMouseGrab(true)
+            },
+          )
+        }
+        return
+      }
+      if (event.button === 2 && document.pointerLockElement !== canvas) {
+        mouseDrag = { x: event.clientX, y: event.clientY }
+      }
     }
     const onPointerMove = (event: PointerEvent) => {
       if (drag?.pointerId !== event.pointerId) return
       event.preventDefault()
-      orbit.current = updateCameraOrbit(orbit.current, {
-        deltaX: event.clientX - drag.x,
-        deltaY: event.clientY - drag.y,
-        zoomDelta: 0,
-      })
-      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+      applyLookDelta(event.clientX - drag.x, event.clientY - drag.y)
+      drag.x = event.clientX
+      drag.y = event.clientY
+    }
+    const onMouseMove = (event: MouseEvent) => {
+      if (!active) return
+      if (document.pointerLockElement === canvas) {
+        if (canvas.dataset.grabHeld === 'true' || cameraResetPendingGrab) return
+        if (!pointerLookCalibrated) {
+          if (!isUsableInitialPointerLookDelta(event.movementX, event.movementY)) return
+          pointerLookCalibrated = true
+        }
+        applyLookDelta(
+          Math.max(-MAX_POINTER_LOOK_DELTA, Math.min(MAX_POINTER_LOOK_DELTA, event.movementX)),
+          Math.max(-MAX_POINTER_LOOK_DELTA, Math.min(MAX_POINTER_LOOK_DELTA, event.movementY)),
+        )
+        return
+      }
+      if (!mouseDrag) return
+      applyLookDelta(event.clientX - mouseDrag.x, event.clientY - mouseDrag.y)
+      mouseDrag.x = event.clientX
+      mouseDrag.y = event.clientY
+    }
+    const onMouseUp = (event: MouseEvent) => {
+      if (event.button === 0) {
+        primaryMouseDown = false
+        clearMouseGrab()
+      }
+      if (event.button === 2) mouseDrag = null
     }
     const onWheel = (event: WheelEvent) => {
+      if (!active) return
       event.preventDefault()
-      orbit.current = updateCameraOrbit(orbit.current, { deltaX: 0, deltaY: 0, zoomDelta: event.deltaY })
+      applyLookDelta(0, 0, event.deltaY)
     }
-    const resetOrbit = () => { orbit.current = { ...DEFAULT_CAMERA_ORBIT } }
+    const onPointerLockChange = () => {
+      const locked = document.pointerLockElement === canvas
+      canvas.dataset.pointerLocked = String(locked)
+      pointerLookCalibrated = !locked
+      if (!locked) clearMouseInput()
+      canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
+      canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') clearMouseInput()
+    }
+    const onContextMenu = (event: MouseEvent) => {
+      if (active) event.preventDefault()
+    }
+    const onCameraReset = (event: KeyboardEvent) => {
+      if (!active || event.code !== 'KeyC' || document.pointerLockElement !== canvas) return
+      orbit.current.yaw = DEFAULT_CAMERA_ORBIT.yaw
+      orbit.current.pitch = DEFAULT_CAMERA_ORBIT.pitch
+      pointerLookCalibrated = false
+      cameraResetPendingGrab = true
+      canvas.dataset.cameraReset = String(Number(canvas.dataset.cameraReset ?? '0') + 1)
+      canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
+      canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
+    }
 
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
-    canvas.addEventListener('pointerup', endDrag)
-    canvas.addEventListener('pointercancel', endDrag)
+    canvas.addEventListener('mousedown', onMouseDown)
+    window.addEventListener('pointerup', endDrag)
+    window.addEventListener('pointercancel', endDrag)
+    window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('blur', clearMouseInput)
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('keydown', onCameraReset)
+    document.addEventListener('pointerlockchange', onPointerLockChange)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     canvas.addEventListener('wheel', onWheel, { passive: false })
-    canvas.addEventListener('dblclick', resetOrbit)
+    canvas.addEventListener('contextmenu', onContextMenu)
+    onPointerLockChange()
     return () => {
+      clearMouseInput()
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
-      canvas.removeEventListener('pointerup', endDrag)
-      canvas.removeEventListener('pointercancel', endDrag)
+      canvas.removeEventListener('mousedown', onMouseDown)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', endDrag)
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('blur', clearMouseInput)
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('keydown', onCameraReset)
+      document.removeEventListener('pointerlockchange', onPointerLockChange)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       canvas.removeEventListener('wheel', onWheel)
-      canvas.removeEventListener('dblclick', resetOrbit)
+      canvas.removeEventListener('contextmenu', onContextMenu)
+      delete canvas.dataset.pointerLocked
+      delete canvas.dataset.grabHeld
+      delete canvas.dataset.cameraYaw
+      delete canvas.dataset.cameraPitch
+      delete canvas.dataset.cameraReset
+      delete canvas.dataset.pointerLockDenied
     }
-  }, [gl, mode, orbit])
+  }, [active, controls, gl, mode, orbit])
 
   useFrame((_, delta) => {
     if (mode === 'spectator') {
       const pose = botPoseAt(elapsed, spectatorIndex)
       desired.set(pose.x + 5.2, pose.y + 3.3, pose.z + 6.2)
       lookAt.set(pose.x, pose.y + 0.55, pose.z)
-    } else {
-      const position = mode === 'network' ? networkTarget?.current : playerPosition?.current
-      if (!position) return
-      const offset = cameraOrbitOffset(orbit.current)
-      lookAt.set(position.x, position.y + 0.75, position.z)
-      desired.set(lookAt.x + offset.x, lookAt.y + offset.y, lookAt.z + offset.z)
+      camera.position.lerp(desired, 1 - Math.exp(-delta * 7.2))
+      camera.lookAt(lookAt)
+      return
     }
 
+    const position = mode === 'network' ? networkTarget?.current : playerPosition?.current
+    if (!position) return
+    const offset = cameraOrbitOffset(orbit.current)
+    desired.set(position.x + offset.x, position.y + 1.05, position.z + offset.z)
     camera.position.lerp(desired, 1 - Math.exp(-delta * 7.2))
+    cameraAimDirection(orbit.current, aimDirection)
+    lookAt.copy(camera.position).addScaledVector(aimDirection, 20)
     camera.lookAt(lookAt)
   })
 
@@ -536,7 +683,9 @@ function NetworkAvatar({
   visual.alive = player.alive
   visual.escaped = player.escaped
   visual.reducedMotion = reducedMotion
-  visual.rescueRole = player.grabTargetId ? 'rescuer' : player.grabbedById ? 'target' : 'none'
+  visual.rescueRole = player.grabTargetId || player.structureGripAnchorId
+    ? 'rescuer'
+    : player.grabbedById ? 'target' : 'none'
 
   useEffect(() => {
     target.set(player.x, player.y, player.z)
@@ -565,10 +714,16 @@ function NetworkAvatar({
 
     const partnerId = player.grabTargetId || player.grabbedById
     const partner = partnerId ? anchors.root.get(partnerId) : undefined
+    const structureAnchor = player.structureGripAnchorId
+      ? gripAnchorById(player.structureGripAnchorId)
+      : null
     const selfRoot = anchors.root.get(player.id)
-    if (partner && selfRoot) {
-      // Both points are world-space inner roots. Mixing either with the outer group position would
-      // inject the scaled boot-support offset and can invert shallow vertical rescue directions.
+    if (structureAnchor && selfRoot) {
+      visual.rescueDirectionX = structureAnchor.x - selfRoot.x
+      visual.rescueDirectionY = structureAnchor.y - selfRoot.y
+      visual.rescueDirectionZ = structureAnchor.z - selfRoot.z
+    } else if (partner && selfRoot) {
+      // Both player points are world-space inner roots. Static anchors are likewise shared world data.
       visual.rescueDirectionX = partner.x - selfRoot.x
       visual.rescueDirectionY = partner.y - selfRoot.y
       visual.rescueDirectionZ = partner.z - selfRoot.z
@@ -588,7 +743,7 @@ function NetworkAvatar({
         frame={frame}
         anchors={anchors}
         scale={0.82}
-        rescueLinkId={player.grabTargetId || player.grabbedById}
+        rescueLinkId={player.grabTargetId || player.grabbedById || player.structureGripAnchorId}
         onPose={onPose}
       />
     </group>
@@ -744,6 +899,7 @@ function NetworkTower({
 }) {
   const cameraOrbit = useRef<CameraOrbit>({ ...DEFAULT_CAMERA_ORBIT })
   const ownPosition = useRef<Vector3 | null>(new Vector3(SPAWN.x, SPAWN.y, SPAWN.z))
+  const canvas = useThree((state) => state.gl.domElement)
   const characterAnchors = useRef<PlayerCharacterAnchorRegistries>(createCharacterAnchorRegistries()).current
   const reducedMotion = useReducedMotion()
   useRunnerControls(controls)
@@ -753,16 +909,31 @@ function NetworkTower({
       controls.jumpQueued.current = false
       return
     }
+    canvas.dataset.transmittedGrabCount = '0'
     const timer = window.setInterval(() => {
       const { rescue, ...movement } = readRunnerInput(controls.input.current)
       // A jump is sent as a single-tick edge; the server still re-validates ground contact.
       const jump = controls.jumpQueued.current
       controls.jumpQueued.current = false
       // Rescue is sent as held state only. The server picks the target, force, and grip.
-      sendInput({ ...movement, jump, grab: rescue, cameraYaw: cameraOrbit.current.yaw })
+      if (rescue) {
+        canvas.dataset.transmittedGrabCount = String(
+          Number(canvas.dataset.transmittedGrabCount ?? '0') + 1,
+        )
+      }
+      sendInput({
+        ...movement,
+        jump,
+        grab: rescue,
+        cameraYaw: cameraOrbit.current.yaw,
+        cameraPitch: cameraOrbit.current.pitch,
+      })
     }, 50)
-    return () => window.clearInterval(timer)
-  }, [active, controls, sendInput])
+    return () => {
+      window.clearInterval(timer)
+      delete canvas.dataset.transmittedGrabCount
+    }
+  }, [active, canvas, controls, sendInput])
 
   return (
     <>
@@ -770,6 +941,8 @@ function NetworkTower({
       <GameCamera
         playerPosition={null}
         orbit={cameraOrbit}
+        controls={controls}
+        active={active}
         mode="network"
         elapsed={match.elapsed}
         spectatorIndex={0}
@@ -910,6 +1083,8 @@ function Tower({
       <GameCamera
         playerPosition={playerPosition}
         orbit={cameraOrbit}
+        controls={controls}
+        active={active}
         mode={presentation.cameraMode}
         elapsed={elapsed}
         spectatorIndex={spectatorIndex}
@@ -1616,7 +1791,30 @@ export default function HellbreakGame() {
           </div>
         )}
         {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && (
-          <div className="camera-hint">화면 드래그 · 시점 회전</div>
+          <>
+            <div className="pointer-lock-overlay">
+              <button
+                type="button"
+                className="pointer-lock-button"
+                onClick={(event) => {
+                  const canvas = event.currentTarget.closest('.viewport')?.querySelector('canvas')
+                  if (!canvas) return
+                  if (typeof canvas.requestPointerLock !== 'function') {
+                    canvas.dataset.pointerLockDenied = 'true'
+                    return
+                  }
+                  void requestPointerLockSafely(
+                    () => canvas.requestPointerLock(),
+                    () => { canvas.dataset.pointerLockDenied = 'true' },
+                  )
+                }}
+              >
+                마우스 조작 시작
+              </button>
+            </div>
+            <div className="aim-reticle" aria-hidden="true" data-testid="aim-reticle" />
+            <div className="camera-hint">중앙 버튼: 마우스 고정 · 마우스: 시야 · C: 다음 잡기 정면 조준 · W: 전진 · 좌클릭 유지: 잡기 · Esc: 해제</div>
+          </>
         )}
         {gameMode === 'local' && spectating && !finished && (
           <div className="spectator-controls" aria-label="관전 대상 변경">
@@ -1650,10 +1848,13 @@ export default function HellbreakGame() {
                 data-own={String(player.id === network.ownPlayerId)}
                 data-alive={String(player.alive)}
                 data-grounded={String(player.grounded)}
-                data-y={player.y.toFixed(2)}
+                data-x={player.x.toFixed(3)}
+                data-y={player.y.toFixed(3)}
+                data-z={player.z.toFixed(3)}
                 data-jump-ack={String(player.lastAcknowledgedJump)}
                 data-grab-target={player.grabTargetId}
                 data-grabbed-by={player.grabbedById}
+                data-structure-grip={player.structureGripAnchorId}
                 data-grip={player.grip.toFixed(2)}
                 data-grab-ack={String(player.lastAcknowledgedGrab)}
                 data-character-model={onlineCharacterPoses[player.id] ? 'infernal-climber' : undefined}

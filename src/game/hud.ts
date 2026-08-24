@@ -193,6 +193,7 @@ export function rescueHudModel(
   }
 
   const linked = Boolean(own) && own!.grabTargetId !== ''
+  const structureHolding = Boolean(own) && own!.structureGripAnchorId !== ''
   const grip = publishedGrip(own?.grip)
 
   const rescued = Boolean(own) && own!.grabbedById !== ''
@@ -209,13 +210,13 @@ export function rescueHudModel(
   // A lockout the clock has already passed is over, and one further away than the longest cooldown
   // the room can charge is a leftover from a restarted match rather than a live penalty.
   const remainingLock = (memory?.lockedUntil ?? 0) - elapsed
-  const locked = !linked && !rescued
+  const locked = !linked && !rescued && !structureHolding
     && remainingLock > 0
     && remainingLock <= RESCUE_EXHAUSTION_COOLDOWN
-  const exhausted = !linked && !rescued
+  const exhausted = !linked && !rescued && !structureHolding
     && (grip <= 0 || (locked && memory?.lockReason === 'exhausted'))
 
-  const candidateNearby = Boolean(own) && !linked && !rescued && players.some((player) => (
+  const candidateNearby = Boolean(own) && !linked && !rescued && !structureHolding && players.some((player) => (
     player.id !== ownPlayerId
     && player.alive
     && !player.escaped
@@ -233,7 +234,7 @@ export function rescueHudModel(
   // The room made a link and dropped it inside one tick, so no link was ever published and the
   // advancing receipt is the only evidence it happened. That proves an attempt failed and nothing
   // more, least of all why, so it is reported as exactly that.
-  const unseenAttemptFailed = Boolean(own) && !linked && !justEnded && memory !== null
+  const unseenAttemptFailed = Boolean(own) && !linked && !structureHolding && !justEnded && memory !== null
     && own!.lastAcknowledgedGrab > memory.acknowledgedGrab
 
   // Two endings are provable from the snapshot alone: the teammate finished standing measurably
@@ -247,7 +248,7 @@ export function rescueHudModel(
         : grip <= 0 ? 'exhausted' : 'lost'
     : unseenAttemptFailed ? 'lost' : null
 
-  const state: RescueHudState = linked
+  const state: RescueHudState = linked || structureHolding
     ? 'holding'
     : rescued
         ? 'held'
@@ -260,14 +261,16 @@ export function rescueHudModel(
   return {
     state,
     linked,
-    showGrip: linked || grip < 1 || locked,
+    showGrip: linked || structureHolding || grip < 1 || locked,
     gripPercent: Math.round(grip * 100),
     gripBand: rescueGripBand(grip),
     targetLabel: linked ? '구조 중' : null,
     rescuedByLabel: rescued ? '구조 받는 중' : null,
     // A locked-out player is told how long, whichever failure put them there, and a live link says
     // in words how close the lava is instead of leaving that to the rope's colour.
-    statusLabel: state === 'cooldown'
+    statusLabel: structureHolding
+      ? '구조물 그립 · W로 올라가기'
+      : state === 'cooldown'
       ? `구조 재시도 ${lockoutSeconds.toFixed(1)}초`
       : state === 'exhausted' && lockoutSeconds > 0
           ? `그립 소진 · ${lockoutSeconds.toFixed(1)}초`

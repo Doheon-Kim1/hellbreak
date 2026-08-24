@@ -10,6 +10,8 @@ import {
   stepRoom,
 } from './room-simulation'
 import { lavaStateAt } from '../game/match'
+import { MAX_CAMERA_PITCH } from '../game/camera'
+import { playgroundGripAnchors } from '../game/grip-anchors'
 import { RESCUE_BALANCE, rescueHoldSeconds } from './rescue-balance'
 import type { AuthoritativeRoomState, PlayerInputCommand, RoomPlayerState } from './room-simulation'
 import {
@@ -360,6 +362,7 @@ describe('server-owned match, lava, and outcome', () => {
         lastAcknowledgedJump: 0,
         grabTargetId: '',
         grabbedById: '',
+        structureGripAnchorId: '',
         grip: 1,
         lastAcknowledgedGrab: 0,
       },
@@ -856,6 +859,50 @@ describe('server-owned lava lifeline rescue', () => {
     expect(far.players['rescuer'].grabTargetId).toBe('')
   })
 
+  it('uses validated camera pitch for a genuinely three-dimensional rescue cone', () => {
+    const overheadPose = {
+      x: LEDGE_X,
+      y: LEDGE_STAND_Y + 0.8,
+      z: LEDGE_Z,
+      grounded: false,
+      velocityY: -1,
+    }
+    let levelAim = applyPlayerInput(rescuePair(overheadPose), 'session-a', {
+      sequence: 1,
+      grab: true,
+      cameraYaw: 0,
+      cameraPitch: 0,
+    })
+    levelAim = stepRoom(levelAim, TICK_SECONDS)
+    expect(levelAim.players['rescuer'].grabTargetId).toBe('')
+
+    let upwardAim = applyPlayerInput(rescuePair(overheadPose), 'session-a', {
+      sequence: 1,
+      grab: true,
+      cameraYaw: 0,
+      cameraPitch: Math.PI / 2,
+    })
+    upwardAim = stepRoom(upwardAim, TICK_SECONDS)
+    expect(upwardAim.players['rescuer'].grabTargetId).toBe('faller')
+  })
+
+  it('rejects non-finite camera pitch and clamps finite pitch before target selection', () => {
+    const initial = rescuePair()
+    const rejected = applyPlayerInput(initial, 'session-a', {
+      sequence: 1,
+      grab: true,
+      cameraPitch: Number.POSITIVE_INFINITY,
+    })
+    expect(rejected).toBe(initial)
+
+    const clamped = applyPlayerInput(initial, 'session-a', {
+      sequence: 1,
+      grab: true,
+      cameraPitch: 100,
+    })
+    expect(clamped.players['rescuer'].input.cameraPitch).toBe(MAX_CAMERA_PITCH)
+  })
+
   it('pulls a grounded teammate only when they stand clearly below the rescuer', () => {
     const ledge = platformSurface(1)
 
@@ -1259,5 +1306,204 @@ describe('server-owned lava lifeline rescue', () => {
 
     // The soak has to actually create links, otherwise the invariants hold vacuously.
     expect(observedLinks).toBeGreaterThan(0)
+  })
+})
+
+describe('server-owned route ledge grip', () => {
+  const ANCHOR = playgroundGripAnchors().find((anchor) => anchor.surfaceIndex === 4 && anchor.normalZ === 1)!
+
+  function aimAtAnchor(player: RoomPlayerState) {
+    const dx = ANCHOR.x - player.x
+    const dy = ANCHOR.y - player.y
+    const dz = ANCHOR.z - player.z
+    const distance = Math.hypot(dx, dy, dz)
+    return {
+      cameraYaw: Math.atan2(-dx, -dz),
+      cameraPitch: Math.asin(dy / distance),
+    }
+  }
+
+  function airborneAtLedge(): AuthoritativeRoomState {
+    let room = joinRoom(createRoomState(), 'climber', 'session-a')
+    return placeRunner(room, 'climber', {
+      x: ANCHOR.hangX,
+      y: ANCHOR.hangY - 0.15,
+      z: ANCHOR.hangZ + ANCHOR.normalZ * 0.15,
+      grounded: false,
+      velocityY: -2,
+    })
+  }
+
+  function startGrip(forward = false): AuthoritativeRoomState {
+    let room = airborneAtLedge()
+    room = applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      grab: true,
+      forward,
+      ...aimAtAnchor(room.players.climber),
+    })
+    return stepRoom(room, 0.05)
+  }
+
+  it('acquires only a registered server anchor from held aim intent', () => {
+    const room = startGrip()
+
+    expect(room.players.climber.structureGripAnchorId).toBe(ANCHOR.id)
+    expect(room.players.climber.grabTargetId).toBe('')
+    expect(room.players.climber.lastAcknowledgedGrab).toBe(1)
+    expect(publicRoomSnapshot(room).players.climber.structureGripAnchorId).toBe(ANCHOR.id)
+  })
+
+  it('holds an airborne capsule at the authoritative hang point without teleporting', () => {
+    let room = startGrip()
+    const first = { ...room.players.climber }
+    for (let tick = 0; tick < 8; tick += 1) room = stepRoom(room, 0.05)
+
+    expect(room.players.climber.structureGripAnchorId).toBe(ANCHOR.id)
+    expect(room.players.climber.grounded).toBe(false)
+    expect(room.players.climber.velocityY).toBe(0)
+    expect(Math.hypot(
+      room.players.climber.x - ANCHOR.hangX,
+      room.players.climber.y - ANCHOR.hangY,
+      room.players.climber.z - ANCHOR.hangZ,
+    )).toBeLessThan(0.15)
+    expect(Math.hypot(
+      first.x - ANCHOR.hangX,
+      first.y - ANCHOR.hangY,
+      first.z - ANCHOR.hangZ,
+    )).toBeLessThan(0.5)
+  })
+
+  it('uses held W to mantle onto the anchor owner support and then clears the hold', () => {
+    let room = startGrip(true)
+    room = stepUntil(room, (state) => state.players.climber.grounded, 80)
+
+    expect(room.players.climber.grounded).toBe(true)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.x).toBeCloseTo(ANCHOR.mantleX, 1)
+    expect(room.players.climber.y).toBeCloseTo(ANCHOR.mantleY, 1)
+    expect(room.players.climber.z).toBeCloseTo(ANCHOR.mantleZ, 1)
+  })
+
+  it('rejects grounded, out-of-cone, and out-of-range structure attempts', () => {
+    let wrongAim = airborneAtLedge()
+    wrongAim = applyPlayerInput(wrongAim, 'session-a', {
+      sequence: 1,
+      grab: true,
+      cameraYaw: aimAtAnchor(wrongAim.players.climber).cameraYaw + Math.PI,
+      cameraPitch: 0,
+    })
+    expect(stepRoom(wrongAim, 0.05).players.climber.structureGripAnchorId).toBe('')
+
+    let grounded = placeRunner(airborneAtLedge(), 'climber', {
+      x: ANCHOR.x,
+      y: ANCHOR.mantleY,
+      z: ANCHOR.z,
+      grounded: true,
+      velocityY: 0,
+    })
+    grounded = applyPlayerInput(grounded, 'session-a', {
+      sequence: 1,
+      grab: true,
+      ...aimAtAnchor(grounded.players.climber),
+    })
+    expect(stepRoom(grounded, 0.05).players.climber.structureGripAnchorId).toBe('')
+
+    let far = placeRunner(airborneAtLedge(), 'climber', { x: ANCHOR.x + 5 })
+    far = applyPlayerInput(far, 'session-a', {
+      sequence: 1,
+      grab: true,
+      ...aimAtAnchor(far.players.climber),
+    })
+    expect(stepRoom(far, 0.05).players.climber.structureGripAnchorId).toBe('')
+  })
+
+  it('rejects a route anchor through the underside of its owner slab', () => {
+    let room = placeRunner(airborneAtLedge(), 'climber', {
+      x: ANCHOR.x,
+      y: ANCHOR.y - 0.65,
+      z: ANCHOR.z - 0.04,
+      grounded: false,
+      velocityY: 0,
+    })
+    room = applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      grab: true,
+      ...aimAtAnchor(room.players.climber),
+    })
+
+    expect(stepRoom(room, 0.01).players.climber.structureGripAnchorId).toBe('')
+  })
+
+  it('rejects an in-range anchor from the platform interior side', () => {
+    let room = placeRunner(airborneAtLedge(), 'climber', {
+      x: ANCHOR.x,
+      y: ANCHOR.y + 0.8,
+      z: ANCHOR.z - 0.2,
+      grounded: false,
+      velocityY: 0,
+    })
+    room = applyPlayerInput(room, 'session-a', {
+      sequence: 1,
+      grab: true,
+      ...aimAtAnchor(room.players.climber),
+    })
+
+    expect(stepRoom(room, 0.01).players.climber.structureGripAnchorId).toBe('')
+  })
+
+  it('breaks an established hold outside server range and applies release cooldown', () => {
+    let room = startGrip()
+    room = placeRunner(room, 'climber', {
+      x: ANCHOR.x + 5,
+      grounded: false,
+      velocityY: 0,
+    })
+    room = stepRoom(room, 0.01)
+
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.grabCooldownUntil).toBeGreaterThan(room.elapsed)
+  })
+
+  it('drains grip, drops on exhaustion, and applies the longer server cooldown', () => {
+    let room = startGrip()
+    room = stepUntil(room, (state) => state.players.climber.structureGripAnchorId === '', 220)
+
+    expect(room.players.climber.grip).toBe(0)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.grabCooldownUntil - room.elapsed).toBeGreaterThan(2.8)
+  })
+
+  it('clears a structure hold on death', () => {
+    let room = startGrip()
+    room = placeRunner(room, 'climber', { y: -4, velocityY: 0, grounded: false })
+    room = stepRoom(room, 0.05)
+
+    expect(room.players.climber.alive).toBe(false)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+  })
+
+  it('clears an active structure hold on restart', () => {
+    let room = startGrip()
+    expect(room.players.climber.structureGripAnchorId).toBe(ANCHOR.id)
+
+    room = restartRoom({ ...room, phase: 'finished', winner: 'warden' })
+
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.grip).toBe(1)
+    expect(room.players.climber.lastAcknowledgedGrab).toBe(0)
+  })
+
+  it('clears on release and does not trust a client-supplied anchor id', () => {
+    let room = startGrip()
+    room = applyPlayerInput(room, 'session-a', {
+      sequence: 2,
+      grab: false,
+      structureGripAnchorId: 'client-hit:999,999,999',
+    } as unknown as PlayerInputCommand)
+    room = stepRoom(room, 0.05)
+
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.grabCooldownUntil).toBeGreaterThan(room.elapsed)
   })
 })

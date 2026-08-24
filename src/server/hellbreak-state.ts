@@ -19,6 +19,8 @@ export class PlayerSchema extends Schema {
   grip = 1
   /** Sequence of the last input the room actually turned into a rescue link. */
   lastAcknowledgedGrab = 0
+  /** Server-selected route ledge; empty when the runner is not holding structure. */
+  structureGripAnchorId = ''
 }
 
 defineTypes(PlayerSchema, {
@@ -36,6 +38,7 @@ defineTypes(PlayerSchema, {
   grabbedById: 'string',
   grip: 'number',
   lastAcknowledgedGrab: 'number',
+  structureGripAnchorId: 'string',
 })
 
 export class HellbreakRoomState extends Schema {

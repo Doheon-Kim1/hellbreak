@@ -57,6 +57,7 @@ function snapshotPlayers(state: HellbreakRoomState | undefined): NetworkPlayerSn
       // not-yet-fully-decoded state. Normalize them before any HUD formatting or link logic runs.
       grabTargetId: player.grabTargetId ?? '',
       grabbedById: player.grabbedById ?? '',
+      structureGripAnchorId: player.structureGripAnchorId ?? '',
       grip: Number.isFinite(player.grip) ? player.grip : 1,
       lastAcknowledgedGrab: player.lastAcknowledgedGrab ?? 0,
     })

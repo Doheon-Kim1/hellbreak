@@ -57,6 +57,41 @@ The online room implements one runner-to-runner rescue link without weakening th
 - a target near the authoritative lava surface receives a stronger panic pull while grip drain and rescuer drag also increase; rescue never grants lava immunity;
 - Colyseus publishes only presentation state (`grabTargetId`, `grabbedById`, normalized `grip`, and `lastAcknowledgedGrab`) for the rope, HUD, and stable test receipts.
 
+### Pointer-lock view and authoritative route ledge grip
+
+Desktop play uses one mutable `CameraOrbit` ref. The centered gameplay button acquires pointer lock only;
+subsequent mouse movement writes signed yaw/pitch, and a held primary button writes the same
+`grab` intent as the keyboard/mobile fallback. Pointer-lock loss, `mouseup`, blur, visibility loss,
+death, and scene cleanup clear the mouse source. Oversized first deltas are rejected while pointer
+lock calibrates, so a browser cursor warp cannot become camera input. A held grab latches aim until
+release; `C` arms one centered next-grab latch for accessibility and deterministic recovery. Touch
+keeps drag-look and the explicit mobile grab button. When pointer lock is unavailable or permission
+is denied, the rejection is consumed and the overlay hides; right-drag remains look and left-hold
+becomes grab without retrying the denied request.
+
+Movement uses only the yaw-derived XZ forward/right basis. Pitch is clamped for aiming but never
+contributes vertical movement. The browser sends `cameraYaw`, `cameraPitch`, and held `grab`; it
+never sends a target ID, hit point, glove transform, force, grip value, or mantle result.
+
+Static structure grip is restricted to server-known route platforms:
+
+- `src/game/grip-anchors.ts` creates immutable, stable edge anchors from the same
+  `PLAYGROUND_ROUTE` surfaces used by the room simulation;
+- an airborne runner holding grab may acquire only a registered anchor after the room validates
+  reach, a 3D aim cone, the outward face, and line of sight against every shared platform AABB,
+  including the anchor owner's slab so a runner cannot grab or mantle through its underside;
+- the room applies capped motion toward the anchor's hang point, drains the existing one-hand grip
+  bar, and treats held W as mantle intent rather than ordinary horizontal movement;
+- release, range break, exhaustion, death, escape, restart, match finish, or disconnect clears the
+  hold; player rescue and structure grip are mutually exclusive;
+- Colyseus publishes only `structureGripAnchorId`, which is sufficient for the client to aim the
+  articulated glove and show the grip HUD. A rendered glove or client raycast is never evidence of
+  gameplay success.
+
+The decorative jungle gym, swings, slides, and moving hazards in `GiantPlayground.tsx` are not yet
+part of the room simulation and therefore are deliberately not grabbable. They must first move into
+a shared server/client geometry descriptor before authoritative anchors can be added.
+
 #### Rescue balance profile
 
 Every rescue number lives in `src/server/rescue-balance.ts` as one frozen, server-owned profile.
