@@ -50,6 +50,11 @@ import type {
 } from '../shared/multiplayer-protocol'
 import { GiantPlayground } from './GiantPlayground'
 import { MultiplayerLobby } from './MultiplayerLobby'
+import { SettingsDialog } from './SettingsDialog'
+import { DEFAULT_GAME_SETTINGS, loadGameSettings, saveGameSettings } from '../game/settings'
+import type { GameSettings } from '../game/settings'
+import { useGameAudio } from '../game/use-game-audio'
+import type { GameAudio } from '../game/audio'
 import { PlayerCharacter } from './PlayerCharacter'
 import type { PlayerCharacterAnchorRegistries, PlayerCharacterFrame } from './PlayerCharacter'
 import type { PlayerCharacterPresentationState } from '../game/player-character-pose'
@@ -83,6 +88,9 @@ type RunnerControls = {
   input: RefObject<RunnerControlSources>
   jumpQueued: RefObject<boolean>
   abilityQueued: RefObject<boolean>
+  blocked: RefObject<boolean>
+  settings: RefObject<GameSettings>
+  audio: RefObject<GameAudio | null>
 }
 
 function createCharacterFrame(overrides: Partial<PlayerCharacterFrame> = {}): PlayerCharacterFrame {
@@ -137,6 +145,7 @@ function useRunnerControls(controls: RunnerControls) {
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (controls.blocked.current || (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) return
       if (event.code === 'Space' || event.code.startsWith('Arrow')) event.preventDefault()
       setKey(event.code, true, event.repeat)
     }
@@ -209,6 +218,8 @@ function GameCamera({
   useEffect(() => {
     if (mode === 'spectator') return
     const canvas = gl.domElement
+    canvas.tabIndex = 0
+    if (active && !controls.blocked.current) canvas.focus({ preventScroll: true })
     let drag: { pointerId: number; x: number; y: number } | null = null
     let mouseDrag: { x: number; y: number } | null = null
     let pointerLookCalibrated = true
@@ -216,7 +227,7 @@ function GameCamera({
     let primaryMouseDown = false
 
     const setMouseGrab = (pressed: boolean) => {
-      const held = active && pressed
+      const held = active && !controls.blocked.current && pressed
       controls.input.current = setRunnerControlSource(
         controls.input.current,
         'rescue',
@@ -229,10 +240,12 @@ function GameCamera({
     const clearMouseInput = () => {
       primaryMouseDown = false
       mouseDrag = null
+      if (drag && canvas.hasPointerCapture(drag.pointerId)) canvas.releasePointerCapture(drag.pointerId)
+      drag = null
       clearMouseGrab()
     }
     const applyLookDelta = (deltaX: number, deltaY: number, zoomDelta = 0) => {
-      updateCameraOrbitInPlace(orbit.current, { deltaX, deltaY, zoomDelta })
+      updateCameraOrbitInPlace(orbit.current, { deltaX, deltaY, zoomDelta }, controls.settings.current)
       canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
       canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
     }
@@ -242,12 +255,12 @@ function GameCamera({
       drag = null
     }
     const onPointerDown = (event: PointerEvent) => {
-      if (!active || !event.isPrimary || event.pointerType === 'mouse') return
+      if (!active || controls.blocked.current || !event.isPrimary || event.pointerType === 'mouse') return
       drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
       canvas.setPointerCapture(event.pointerId)
     }
     const onMouseDown = (event: MouseEvent) => {
-      if (!active) return
+      if (!active || controls.blocked.current) return
       if (event.button === 0) {
         primaryMouseDown = true
         if (document.pointerLockElement === canvas) {
@@ -282,14 +295,14 @@ function GameCamera({
       }
     }
     const onPointerMove = (event: PointerEvent) => {
-      if (drag?.pointerId !== event.pointerId) return
+      if (controls.blocked.current || drag?.pointerId !== event.pointerId) return
       event.preventDefault()
       applyLookDelta(event.clientX - drag.x, event.clientY - drag.y)
       drag.x = event.clientX
       drag.y = event.clientY
     }
     const onMouseMove = (event: MouseEvent) => {
-      if (!active) return
+      if (!active || controls.blocked.current) return
       if (document.pointerLockElement === canvas) {
         if (canvas.dataset.grabHeld === 'true' || cameraResetPendingGrab) return
         if (!pointerLookCalibrated) {
@@ -315,7 +328,7 @@ function GameCamera({
       if (event.button === 2) mouseDrag = null
     }
     const onWheel = (event: WheelEvent) => {
-      if (!active) return
+      if (!active || controls.blocked.current) return
       event.preventDefault()
       applyLookDelta(0, 0, event.deltaY)
     }
@@ -334,7 +347,7 @@ function GameCamera({
       if (active) event.preventDefault()
     }
     const onCameraReset = (event: KeyboardEvent) => {
-      if (!active || event.code !== 'KeyC' || document.pointerLockElement !== canvas) return
+      if (!active || controls.blocked.current || event.code !== 'KeyC' || document.pointerLockElement !== canvas) return
       orbit.current.yaw = DEFAULT_CAMERA_ORBIT.yaw
       orbit.current.pitch = DEFAULT_CAMERA_ORBIT.pitch
       pointerLookCalibrated = false
@@ -355,6 +368,7 @@ function GameCamera({
     document.addEventListener('keydown', onCameraReset)
     document.addEventListener('pointerlockchange', onPointerLockChange)
     document.addEventListener('visibilitychange', onVisibilityChange)
+    document.addEventListener('hellbreak-input-reset', clearMouseInput)
     canvas.addEventListener('wheel', onWheel, { passive: false })
     canvas.addEventListener('contextmenu', onContextMenu)
     onPointerLockChange()
@@ -371,6 +385,7 @@ function GameCamera({
       document.removeEventListener('keydown', onCameraReset)
       document.removeEventListener('pointerlockchange', onPointerLockChange)
       document.removeEventListener('visibilitychange', onVisibilityChange)
+      document.removeEventListener('hellbreak-input-reset', clearMouseInput)
       canvas.removeEventListener('wheel', onWheel)
       canvas.removeEventListener('contextmenu', onContextMenu)
       delete canvas.dataset.pointerLocked
@@ -445,10 +460,14 @@ function PlayerRunner({
   const groundContacts = useRef<Set<number>>(new Set())
   const footSensor = useRef<RapierCollider>(null)
   const { world } = useRapier()
+  const canvas = useThree((state) => state.gl.domElement)
   const deathCooldown = useRef(false)
   const rocketUntil = useRef(0)
   const springArmed = useRef(false)
   const lavaGraceUntil = useRef(0)
+  const previouslyGrounded = useRef(true)
+  const hasStarted = useRef(false)
+  const positionSample = useRef(0)
   const characterFrame = useRef<PlayerCharacterFrame>(createCharacterFrame({ reducedMotion }))
   characterFrame.current.escaped = escaped
   characterFrame.current.reducedMotion = reducedMotion
@@ -489,7 +508,16 @@ function PlayerRunner({
     visual.alive = true
     visual.escaped = escaped
     visual.reducedMotion = reducedMotion
-    if (!active) {
+    // Keep actual-position diagnostics live during a settings pause, in this body read's sole
+    // frame owner. Never touch an idle/uninitialized body before its first active frame.
+    if (active) hasStarted.current = true
+    const position = active || (controls.blocked.current && hasStarted.current) ? runner.translation() : null
+    if (position) {
+      positionRef.current.set(position.x, position.y, position.z)
+      canvas.dataset.localY = position.y.toFixed(3)
+      canvas.dataset.localPositionSample = String(++positionSample.current)
+    }
+    if (!active || !position) {
       visual.velocityX = 0
       visual.velocityY = 0
       visual.velocityZ = 0
@@ -511,8 +539,10 @@ function PlayerRunner({
       }
     }
 
-    const position = runner.translation()
-    positionRef.current.set(position.x, position.y, position.z)
+    canvas.dataset.localGrounded = String(groundContacts.current.size > 0)
+    const grounded = groundContacts.current.size > 0
+    if (grounded && !previouslyGrounded.current) controls.audio.current?.play('land')
+    previouslyGrounded.current = grounded
 
     if (position.y < lavaHeight + 0.35 && elapsed >= lavaGraceUntil.current && !deathCooldown.current) {
       if (heldAbility === 'extinguisher') {
@@ -559,6 +589,8 @@ function PlayerRunner({
       if (groundContacts.current.size > 0) {
         const jumpMultiplier = springArmed.current ? abilitySpec('spring-shoes').jumpMultiplier : 1
         runner.setLinvel({ x: velocity.x, y: JUMP_SPEED * jumpMultiplier, z: velocity.z }, true)
+        canvas.dataset.localJumpAck = String(Number(canvas.dataset.localJumpAck ?? '0') + 1)
+        controls.audio.current?.play('jump')
         if (springArmed.current) {
           springArmed.current = false
           onFeedback('스프링 점프!')
@@ -913,7 +945,7 @@ function NetworkTower({
     const timer = window.setInterval(() => {
       const { rescue, ...movement } = readRunnerInput(controls.input.current)
       // A jump is sent as a single-tick edge; the server still re-validates ground contact.
-      const jump = controls.jumpQueued.current
+      const jump = !controls.blocked.current && controls.jumpQueued.current
       controls.jumpQueued.current = false
       // Rescue is sent as held state only. The server picks the target, force, and grip.
       if (rescue) {
@@ -1224,10 +1256,11 @@ function SceneHealth({
 }
 
 function GameScene({
+  paused = false,
   onReady,
   onFailure,
   ...props
-}: Parameters<typeof Tower>[0] & { onReady: () => void; onFailure: (message: string) => void }) {
+}: Parameters<typeof Tower>[0] & { paused?: boolean; onReady: () => void; onFailure: (message: string) => void }) {
   return (
     <Canvas
       camera={{ position: [7, 3, 8], fov: 48 }}
@@ -1239,7 +1272,7 @@ function GameScene({
       <ambientLight intensity={0.8} />
       <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
       <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
-      <Physics gravity={[0, -18, 0]}>
+      <Physics gravity={[0, -18, 0]} paused={paused}>
         <SceneHealth onReady={onReady} onFailure={onFailure} />
         <Tower {...props} />
       </Physics>
@@ -1456,8 +1489,49 @@ export default function HellbreakGame() {
   const input = useRef<RunnerControlSources>(createRunnerControlSources())
   const jumpQueued = useRef(false)
   const abilityQueued = useRef(false)
-  const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued }), [])
+  const blocked = useRef(false)
+  const settingsRef = useRef<GameSettings>({ ...DEFAULT_GAME_SETTINGS })
+  const [settings, setSettings] = useState<GameSettings>({ ...DEFAULT_GAME_SETTINGS })
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSaved, setSettingsSaved] = useState(true)
   const network = useHellbreakRoom()
+  const audio = useGameAudio(settings, !settingsOpen && (gameMode === 'local'
+    ? started && !spectating && !playerEscaped && elapsed < 180
+    : network.status === 'connected' && network.match.phase !== 'finished'))
+  const controls = useMemo<RunnerControls>(() => ({ input, jumpQueued, abilityQueued, blocked, settings: settingsRef, audio }), [audio])
+  useEffect(() => {
+    try { settingsRef.current = loadGameSettings(window.localStorage); setSettings(settingsRef.current) }
+    catch { setSettingsSaved(false) }
+  }, [])
+  const updateSettings = (value: GameSettings) => {
+    settingsRef.current = value
+    setSettings(value)
+    try { setSettingsSaved(saveGameSettings(window.localStorage, value)) }
+    catch { setSettingsSaved(false) }
+  }
+  const openSettings = useCallback(() => {
+    blocked.current = true
+    controls.input.current = createRunnerControlSources()
+    controls.jumpQueued.current = false
+    controls.abilityQueued.current = false
+    if (document.pointerLockElement) document.exitPointerLock()
+    document.dispatchEvent(new Event('hellbreak-input-reset'))
+    setSettingsOpen(true)
+  }, [controls])
+  const closeSettings = () => {
+    controls.input.current = createRunnerControlSources()
+    controls.jumpQueued.current = false
+    controls.abilityQueued.current = false
+    blocked.current = false
+    setSettingsOpen(false)
+  }
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.code === 'Escape' && !event.repeat && !blocked.current) openSettings()
+    }
+    window.addEventListener('keydown', escape)
+    return () => window.removeEventListener('keydown', escape)
+  }, [openSettings])
   const [onlineCharacterPoses, setOnlineCharacterPoses] = useState<Record<string, OnlineCharacterPoseEvidence>>({})
   const handleOnlineCharacterPose = useCallback((
     playerId: string,
@@ -1482,6 +1556,12 @@ export default function HellbreakGame() {
   const multiplayerModes = useMultiplayerModes(network.status !== 'unavailable')
   const [multiplayerMode, setMultiplayerMode] = useState<MultiplayerModeId>('guest')
   const onlineConnected = gameMode === 'online' && network.status === 'connected'
+  useEffect(() => {
+    if (!settingsOpen && (started || onlineConnected)) {
+      const frame = requestAnimationFrame(() => document.querySelector('canvas')?.focus({ preventScroll: true }))
+      return () => cancelAnimationFrame(frame)
+    }
+  }, [settingsOpen, started, onlineConnected, resetToken])
   const onlineHud = onlineHudModel(network.match, network.players, network.ownPlayerId)
   // What the previous patch showed, so an ended link can be told apart from a completed one and a
   // failure can be read back as the cooldown the room is about to enforce.
@@ -1501,12 +1581,28 @@ export default function HellbreakGame() {
   const hellEvent = hellEventAt(elapsed)
   const finished = started && match.phase === 'finished'
   const winnerLabel = match.winner === 'runners' ? '도망자' : '지옥 간수'
+  const previousSoundPlayer = useRef<NetworkPlayerSnapshot | null>(null)
+  const ownSoundPlayer = network.players.find((player) => player.id === network.ownPlayerId) ?? null
+  useEffect(() => {
+    const previous = previousSoundPlayer.current
+    previousSoundPlayer.current = onlineConnected ? ownSoundPlayer : null
+    if (!onlineConnected || !ownSoundPlayer || !previous || previous.id !== ownSoundPlayer.id) return
+    if (ownSoundPlayer.lastAcknowledgedJump > previous.lastAcknowledgedJump) audio.current?.play('jump')
+    if (ownSoundPlayer.lastAcknowledgedGrab > previous.lastAcknowledgedGrab) audio.current?.play('grab')
+    if (ownSoundPlayer.grounded && !previous.grounded) audio.current?.play('land')
+    if (!ownSoundPlayer.alive && previous.alive) audio.current?.play('death')
+    if (ownSoundPlayer.escaped && !previous.escaped) audio.current?.play('win')
+  }, [audio, onlineConnected, ownSoundPlayer])
+  const lavaAudioPhase = gameMode === 'local' ? match.lavaPhase : network.match.lavaPhase
+  useEffect(() => {
+    if ((started || onlineConnected) && lavaAudioPhase === 'warning') audio.current?.play('warning')
+  }, [audio, gameMode, started, onlineConnected, lavaAudioPhase])
 
   useEffect(() => {
-    if (gameMode !== 'local' || !started || !sceneReady || sceneError || finished) return
+    if (settingsOpen || gameMode !== 'local' || !started || !sceneReady || sceneError || finished) return
     const timer = window.setInterval(() => setElapsed((value) => Math.min(180, value + 0.1)), 100)
     return () => window.clearInterval(timer)
-  }, [gameMode, started, sceneReady, sceneError, finished])
+  }, [settingsOpen, gameMode, started, sceneReady, sceneError, finished])
 
   useEffect(() => {
     if (!feedback) return
@@ -1575,6 +1671,7 @@ export default function HellbreakGame() {
   }
 
   const startMatch = () => {
+    audio.current?.play('start')
     controls.input.current = createRunnerControlSources()
     controls.jumpQueued.current = false
     controls.abilityQueued.current = false
@@ -1633,6 +1730,9 @@ export default function HellbreakGame() {
 
   return (
     <main className={`shell${(gameMode === 'local' ? started && !finished : onlineConnected) ? ' playing' : ''}`}>
+      <SettingsDialog open={settingsOpen} settings={settings} online={onlineConnected} saved={settingsSaved}
+        onChange={updateSettings} onClose={closeSettings} onTestSound={() => audio.current?.play('win')} />
+      <button className="settings-trigger" type="button" onClick={openSettings} aria-haspopup="dialog">설정</button>
       <section className="hud" aria-label="게임 정보와 조작법">
         <div className="eyebrow">OPENAI GAME BUILDERS SEOUL · 플레이 가능한 MVP 0.3</div>
         <h1>HELL<span>BREAK</span></h1>
@@ -1687,7 +1787,7 @@ export default function HellbreakGame() {
         )}
         <ul>
           <li><kbd>WASD</kbd> 이동</li>
-          <li><kbd>SPACE</kbd> 점프</li>
+          <li><kbd>SPACE</kbd> 점프{gameMode === 'online' ? ' · 매달림 점프' : ''}</li>
           <li><kbd>SHIFT</kbd> 달리기</li>
           {gameMode === 'local' && <li><kbd>F</kbd> 획득한 능력 사용</li>}
           {gameMode === 'online' && <li><kbd>E</kbd> 길게 눌러 추락한 팀원 구조</li>}
@@ -1702,11 +1802,12 @@ export default function HellbreakGame() {
               elapsed={elapsed}
               lavaHeight={match.lavaHeight}
               event={hellEvent}
-              active={started && sceneReady && !finished && !playerEscaped && !spectating}
+              active={!settingsOpen && started && sceneReady && !finished && !playerEscaped && !spectating}
               playerEscaped={playerEscaped}
               heldAbility={heldAbility}
               resetToken={resetToken}
               controls={controls}
+              paused={settingsOpen}
               spectating={spectating}
               spectatorIndex={spectatorIndex}
               onPickupAbility={(ability) => {
@@ -1716,10 +1817,11 @@ export default function HellbreakGame() {
               onConsumeAbility={() => setHeldAbility(null)}
               onFeedback={setFeedback}
               onDeath={() => {
+                audio.current?.play('death')
                 setDeaths((value: number) => value + 1)
                 setSpectating(true)
               }}
-              onEscape={() => setPlayerEscaped(true)}
+              onEscape={() => { audio.current?.play('win'); setPlayerEscaped(true) }}
               onReady={() => {
                 setSceneReady(true)
                 setSceneError(null)
@@ -1790,7 +1892,7 @@ export default function HellbreakGame() {
             F · {abilitySpec(heldAbility).label}
           </div>
         )}
-        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && (
+        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && !settingsOpen && (
           <>
             <div className="pointer-lock-overlay">
               <button
@@ -1813,7 +1915,9 @@ export default function HellbreakGame() {
               </button>
             </div>
             <div className="aim-reticle" aria-hidden="true" data-testid="aim-reticle" />
-            <div className="camera-hint">중앙 버튼: 마우스 고정 · 마우스: 시야 · C: 다음 잡기 정면 조준 · W: 전진 · 좌클릭 유지: 잡기 · Esc: 해제</div>
+            <div className="camera-hint">{gameMode === 'online'
+              ? '마우스: 시야 · 좌클릭 유지: 잡기 · Space: 점프 / 매달림 점프 · W: 턱 올라가기 · C: 정면 조준 · Esc: 설정'
+              : '마우스: 시야 · WASD: 이동 · Space: 점프 · F: 능력 · Esc: 설정'}</div>
           </>
         )}
         {gameMode === 'local' && spectating && !finished && (
@@ -1827,7 +1931,7 @@ export default function HellbreakGame() {
             </button>
           </div>
         )}
-        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && (
+        {((gameMode === 'local' && started && !finished && !playerEscaped && !spectating) || (onlineConnected && onlineHud.canMove)) && sceneReady && !settingsOpen && (
           <MobileControls
             controls={controls}
             heldAbility={gameMode === 'local' ? heldAbility : null}

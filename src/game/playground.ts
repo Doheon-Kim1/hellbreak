@@ -84,7 +84,9 @@ export function supportTopBelow(x: number, z: number, feetFrom: number, feetTo: 
   if (feetTo > feetFrom || !insideWorldBounds(x, z)) return null
 
   let support: number | null = null
-  const crossed = (top: number) => top <= feetFrom && top >= feetTo
+  // Subtracting the capsule half-height can put resting feet a few ULP below the slab.
+  // A numerical tolerance preserves contact; it is not a gameplay coyote-time allowance.
+  const crossed = (top: number) => top <= feetFrom + 1e-9 && top >= feetTo - 1e-9
 
   if (crossed(PLAYGROUND_GROUND_TOP)) support = PLAYGROUND_GROUND_TOP
   for (const surface of SURFACES) {

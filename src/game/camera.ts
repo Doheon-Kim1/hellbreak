@@ -60,9 +60,13 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 /** Mutates a caller-owned camera state so raw pointer-lock motion does not allocate per event. */
-export function updateCameraOrbitInPlace(orbit: CameraOrbit, input: CameraOrbitInput): CameraOrbit {
-  orbit.yaw -= input.deltaX * MOUSE_YAW_SPEED
-  orbit.pitch = clamp(orbit.pitch - input.deltaY * MOUSE_PITCH_SPEED, MIN_CAMERA_PITCH, MAX_CAMERA_PITCH)
+export function updateCameraOrbitInPlace(
+  orbit: CameraOrbit, input: CameraOrbitInput,
+  settings: { sensitivity: number; invertY: boolean } = { sensitivity: 1, invertY: false },
+): CameraOrbit {
+  const sensitivity = Number.isFinite(settings.sensitivity) ? clamp(settings.sensitivity, 0.2, 3) : 1
+  orbit.yaw -= input.deltaX * MOUSE_YAW_SPEED * sensitivity
+  orbit.pitch = clamp(orbit.pitch - input.deltaY * MOUSE_PITCH_SPEED * sensitivity * (settings.invertY ? -1 : 1), MIN_CAMERA_PITCH, MAX_CAMERA_PITCH)
   orbit.distance = clamp(orbit.distance + input.zoomDelta * ZOOM_SPEED, MIN_DISTANCE, MAX_DISTANCE)
   return orbit
 }

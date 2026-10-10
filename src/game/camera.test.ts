@@ -11,6 +11,14 @@ import {
 } from './camera'
 
 describe('pointer-lock third-person camera', () => {
+  it('applies bounded sensitivity and inverted Y without changing wheel zoom', () => {
+    const input = { deltaX: 20, deltaY: 20, zoomDelta: 100 }
+    const normal = updateCameraOrbitInPlace({ ...DEFAULT_CAMERA_ORBIT }, input)
+    const slow = updateCameraOrbitInPlace({ ...DEFAULT_CAMERA_ORBIT }, input, { sensitivity: 0.5, invertY: true })
+    expect(DEFAULT_CAMERA_ORBIT.yaw - slow.yaw).toBeCloseTo((DEFAULT_CAMERA_ORBIT.yaw - normal.yaw) / 2)
+    expect(slow.pitch).toBeCloseTo(-normal.pitch / 2)
+    expect(slow.distance).toBe(normal.distance)
+  })
   it('mutates caller-owned view state instead of allocating on every mouse event', () => {
     const orbit = { ...DEFAULT_CAMERA_ORBIT }
     const updated = updateCameraOrbitInPlace(orbit, { deltaX: 100, deltaY: -40, zoomDelta: 0 })

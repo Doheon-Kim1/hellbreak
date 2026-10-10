@@ -41,7 +41,7 @@ export interface RoomPlayerState {
   queuedJumpSequence: number
   /**
    * Server-owned receipt: the sequence of the input whose jump the room actually turned into a
-   * grounded takeoff impulse. Clients cannot set it, and held, replayed, or airborne jump intent
+   * grounded or valid ledge-hang takeoff impulse. Clients cannot set it; held, replayed, or unheld airborne jump intent
    * leaves it untouched, so an increase is proof that one real jump started.
    */
   lastAcknowledgedJump: number
@@ -364,10 +364,13 @@ function clampToWorld(value: number): number {
   return Math.min(PLAYGROUND_HALF_EXTENT, Math.max(-PLAYGROUND_HALF_EXTENT, value))
 }
 
-function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState {
+function advancePlayer(player: RoomPlayerState, delta: number, elapsed: number): RoomPlayerState {
+  const anchor = gripAnchorById(player.structureGripAnchorId)
+  const gripJump = player.queuedJumpSequence > 0 && anchor !== null
+    && player.grip > 0 && structureGripDistance(player, anchor) <= STRUCTURE_GRIP.breakRange
   const requestedSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
   // W becomes mantle intent while holding structure; ordinary travel must not outrun the constraint.
-  const baseSpeed = player.structureGripAnchorId === '' ? requestedSpeed : 0
+  const baseSpeed = player.structureGripAnchorId === '' || gripJump ? requestedSpeed : 0
   // Holding a teammate costs footing, so a rescuer walks slower until the link ends.
   const speed = player.grabTargetId === '' ? baseSpeed : baseSpeed * RESCUE.speedScale
   const localVelocity = movementVelocity(player.input, speed)
@@ -375,7 +378,7 @@ function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState 
   const x = clampToWorld(player.x + velocity.x * delta)
   const z = clampToWorld(player.z + velocity.z * delta)
 
-  const takeoff = player.queuedJumpSequence > 0 && player.grounded
+  const takeoff = player.queuedJumpSequence > 0 && (player.grounded || gripJump)
   const velocityY = Math.max(
     -MAX_FALL_SPEED,
     (takeoff ? JUMP_SPEED : player.velocityY) + GRAVITY * delta,
@@ -393,6 +396,11 @@ function advancePlayer(player: RoomPlayerState, delta: number): RoomPlayerState 
     y: support === null ? y : support + PLAYER_HALF_HEIGHT,
     velocityY: support === null ? velocityY : 0,
     grounded: support !== null,
+    structureGripAnchorId: gripJump ? '' : player.structureGripAnchorId,
+    // Held mouse must not immediately re-grab and overwrite the launch velocity this tick.
+    grabCooldownUntil: gripJump
+      ? Math.max(player.grabCooldownUntil, elapsed + STRUCTURE_GRIP.releaseCooldown)
+      : player.grabCooldownUntil,
     // Unused intent expires with the tick, so an airborne press cannot buffer a later takeoff.
     queuedJumpSequence: 0,
     lastAcknowledgedJump: takeoff ? player.queuedJumpSequence : player.lastAcknowledgedJump,
@@ -902,7 +910,7 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
     // Eliminated and escaped runners no longer consume movement or jump intent.
     advanced[id] = !player.alive || player.escaped
       ? { ...player, queuedJumpSequence: 0 }
-      : advancePlayer(player, delta)
+      : advancePlayer(player, delta, elapsed)
   }
 
   // 3-5. Break invalidated player links, then resolve new ones deterministically.

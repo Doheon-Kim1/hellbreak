@@ -49,6 +49,20 @@ function stepUntil(
 }
 
 describe('authoritative multiplayer room', () => {
+  it('keeps every route footing stable and permits exactly one fresh Space takeoff', () => {
+    for (let index = 0; index < 16; index += 1) {
+      const surface = platformSurface(index)
+      let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+      room = placeRunner(room, 'runner-1', { x: (surface.minX + surface.maxX) / 2,
+        z: (surface.minZ + surface.maxZ) / 2, y: surface.top + PLAYER_HALF_HEIGHT,
+        velocityY: 0, grounded: true })
+      for (let tick = 0; tick < 10; tick += 1) room = stepRoom(room, 0.05)
+      expect(room.players['runner-1'].grounded).toBe(true)
+      room = stepRoom(applyPlayerInput(room, 'session-a', { sequence: 1, jump: true }), 0.05)
+      expect(room.players['runner-1'].velocityY).toBeGreaterThan(0)
+      expect(room.players['runner-1'].lastAcknowledgedJump).toBe(1)
+    }
+  })
   it('assigns deterministic spawn slots on the first route platform and reuses a released slot', () => {
     let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
     room = joinRoom(room, 'runner-2', 'session-b')
@@ -1383,6 +1397,36 @@ describe('server-owned route ledge grip', () => {
     expect(room.players.climber.x).toBeCloseTo(ANCHOR.mantleX, 1)
     expect(room.players.climber.y).toBeCloseTo(ANCHOR.mantleY, 1)
     expect(room.players.climber.z).toBeCloseTo(ANCHOR.mantleZ, 1)
+  })
+
+  it('jumps upward from an established hang with Space while grab remains held', () => {
+    let room = startGrip()
+    const before = room.players.climber
+    room = applyPlayerInput(room, 'session-a', { sequence: 2, grab: true, jump: true,
+      ...aimAtAnchor(before) })
+    room = stepRoom(room, 0.05)
+    expect(room.players.climber.velocityY).toBeGreaterThan(0)
+    expect(room.players.climber.y).toBeGreaterThan(before.y)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.lastAcknowledgedJump).toBe(2)
+    expect(room.players.climber.grabCooldownUntil).toBeGreaterThan(room.elapsed)
+    room = stepRoom(room, 0.05)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
+    expect(room.players.climber.velocityY).toBeGreaterThan(0)
+  })
+
+  it('cannot turn a held or repeated hanging jump into an airborne double jump', () => {
+    let room = startGrip()
+    const command = { grab: true, jump: true, ...aimAtAnchor(room.players.climber) }
+    room = stepRoom(applyPlayerInput(room, 'session-a', { sequence: 2, ...command }), 0.05)
+    const launchSpeed = room.players.climber.velocityY
+    room = stepRoom(applyPlayerInput(room, 'session-a', { sequence: 3, ...command }), 0.05)
+    expect(room.players.climber.lastAcknowledgedJump).toBe(2)
+    expect(room.players.climber.velocityY).toBeLessThan(launchSpeed)
+    room = applyPlayerInput(room, 'session-a', { sequence: 4, ...command, jump: false })
+    room = stepRoom(applyPlayerInput(room, 'session-a', { sequence: 5, ...command }), 0.05)
+    expect(room.players.climber.lastAcknowledgedJump).toBe(2)
+    expect(room.players.climber.structureGripAnchorId).toBe('')
   })
 
   it('rejects grounded, out-of-cone, and out-of-range structure attempts', () => {

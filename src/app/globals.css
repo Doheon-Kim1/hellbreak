@@ -1,4 +1,22 @@
 * { box-sizing: border-box; }
+.settings-trigger { position: fixed; z-index: 12; top: .8rem; right: .8rem; margin: 0; padding: .6rem .9rem; background: #160e17; }
+.settings-dialog { width: min(32rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); padding: 1.4rem; overflow-y: auto; border: 1px solid #754238; border-radius: .75rem; background: #170f19; color: #f6eee7; box-shadow: 0 1rem 5rem #000b; }
+.settings-dialog::backdrop { background: #07040cce; backdrop-filter: blur(4px); }
+.settings-dialog header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.settings-dialog h2 { margin: .4rem 0; font-size: 1.5rem; }
+.settings-dialog small { color: #ff906a; font-size: .6rem; letter-spacing: .12em; }
+.settings-dialog button { margin: 0; padding: .65rem .8rem; }
+.settings-dialog fieldset { margin: 1rem 0; padding: .8rem 1rem; border: 1px solid #50313e; border-radius: .5rem; }
+.settings-dialog legend { color: #ffbea9; font-weight: 700; font-size: .85rem; }
+.settings-slider { display: block; margin: .5rem 0 1rem; font-size: .8rem; }
+.settings-slider span { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: .55rem; }
+.settings-slider output { color: #9befff; font-variant-numeric: tabular-nums; }
+.settings-slider input { width: 100%; accent-color: #ff7448; cursor: pointer; }
+.settings-check { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; font-size: .8rem; }
+.settings-check input { accent-color: #ff7448; width: 1.1rem; height: 1.1rem; }
+.settings-note { color: #bba6b2; font-size: .75rem; line-height: 1.6; }
+.settings-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.settings-dialog footer span { color: #9befff; font-size: .65rem; }
 :root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #f6eee7; background: #09060d; font-synthesis: none; text-rendering: optimizeLegibility; }
 html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
 button, input { font: inherit; }

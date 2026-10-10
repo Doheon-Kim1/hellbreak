@@ -41,6 +41,13 @@ describe('giant playground route', () => {
 })
 
 describe('playground collision surfaces', () => {
+  it('keeps support after a capsule centre/feet round trip on every route slab', () => {
+    for (const surface of playgroundSurfaces()) {
+      const feet = (surface.top + 0.72) - 0.72
+      expect(supportTopBelow((surface.minX + surface.maxX) / 2, (surface.minZ + surface.maxZ) / 2,
+        feet, feet - 0.05)).toBe(surface.top)
+    }
+  })
   it('derives 3D platform bounds from the rendered route geometry', () => {
     const surfaces = playgroundSurfaces()
     const first = platformSurface(0)
