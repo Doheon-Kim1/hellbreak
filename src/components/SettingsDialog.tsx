@@ -32,6 +32,10 @@ export function SettingsDialog({ open, settings, online, saved, onChange, onClos
         <label className="settings-check"><input type="checkbox" checked={settings.invertY}
           onChange={(event) => onChange({ ...settings, invertY: event.target.checked })} />Y축 반전</label>
       </fieldset>
+      <fieldset><legend>조작 안내</legend>
+        <label className="settings-check"><input type="checkbox" checked={settings.showGuide}
+          onChange={(event) => onChange({ ...settings, showGuide: event.target.checked })} />하단 조작 가이드 표시</label>
+      </fieldset>
       <fieldset><legend>게임 사운드</legend>
         {slider('masterVolume', '전체 볼륨')}{slider('effectsVolume', '효과음 볼륨')}{slider('ambientVolume', '용암 배경음 볼륨')}
         <label className="settings-check"><input type="checkbox" checked={settings.muted}

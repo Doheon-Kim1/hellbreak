@@ -1,5 +1,5 @@
 import { MAX_CAMERA_PITCH, MIN_CAMERA_PITCH, rotateMovementByCamera } from '../game/camera'
-import { movementVelocity } from '../game/movement'
+import { JUMP_BUFFER_SECONDS, movementVelocity } from '../game/movement'
 import { gripAnchorById, playgroundGripAnchors } from '../game/grip-anchors'
 import type { GripAnchor } from '../game/grip-anchors'
 import { lavaStateAt } from '../game/match'
@@ -39,6 +39,8 @@ export interface RoomPlayerState {
   escaped: boolean
   /** Sequence of the input that armed a takeoff for the next tick; 0 when nothing is armed. */
   queuedJumpSequence: number
+  /** Deadline measured only by server room time, never accepted from browser payloads. */
+  queuedJumpUntil: number
   /**
    * Server-owned receipt: the sequence of the input whose jump the room actually turned into a
    * grounded or valid ledge-hang takeoff impulse. Clients cannot set it; held, replayed, or unheld airborne jump intent
@@ -220,6 +222,7 @@ function spawnedPlayer(spawnSlot: number, previous?: RoomPlayerState): RoomPlaye
     alive: true,
     escaped: false,
     queuedJumpSequence: 0,
+    queuedJumpUntil: 0,
     // A spawn or restart clears the receipt even though input sequences keep counting up.
     lastAcknowledgedJump: 0,
     grabTargetId: '',
@@ -343,6 +346,7 @@ export function applyPlayerInput(
 
   // Only a false→true transition arms a jump, so a held button cannot buffer repeated takeoffs.
   const jumpEdge = Boolean(command.jump) && !player.input.jump
+  const pendingJump = player.queuedJumpSequence > 0 && player.queuedJumpUntil >= room.elapsed
 
   return {
     ...room,
@@ -353,7 +357,8 @@ export function applyPlayerInput(
         lastSequence: command.sequence,
         // The first armed sequence wins, so a later input in the same tick cannot rewrite the
         // receipt the client is waiting for.
-        queuedJumpSequence: player.queuedJumpSequence || (jumpEdge ? command.sequence : 0),
+        queuedJumpSequence: pendingJump ? player.queuedJumpSequence : jumpEdge ? command.sequence : 0,
+        queuedJumpUntil: pendingJump ? player.queuedJumpUntil : jumpEdge ? room.elapsed + JUMP_BUFFER_SECONDS : 0,
         input: command,
       },
     },
@@ -365,8 +370,9 @@ function clampToWorld(value: number): number {
 }
 
 function advancePlayer(player: RoomPlayerState, delta: number, elapsed: number): RoomPlayerState {
+  const pendingJump = player.queuedJumpSequence > 0 && elapsed <= player.queuedJumpUntil
   const anchor = gripAnchorById(player.structureGripAnchorId)
-  const gripJump = player.queuedJumpSequence > 0 && anchor !== null
+  const gripJump = pendingJump && anchor !== null
     && player.grip > 0 && structureGripDistance(player, anchor) <= STRUCTURE_GRIP.breakRange
   const requestedSpeed = player.input.sprint ? SPRINT_SPEED : WALK_SPEED
   // W becomes mantle intent while holding structure; ordinary travel must not outrun the constraint.
@@ -378,7 +384,7 @@ function advancePlayer(player: RoomPlayerState, delta: number, elapsed: number):
   const x = clampToWorld(player.x + velocity.x * delta)
   const z = clampToWorld(player.z + velocity.z * delta)
 
-  const takeoff = player.queuedJumpSequence > 0 && (player.grounded || gripJump)
+  const takeoff = pendingJump && (player.grounded || gripJump)
   const velocityY = Math.max(
     -MAX_FALL_SPEED,
     (takeoff ? JUMP_SPEED : player.velocityY) + GRAVITY * delta,
@@ -401,8 +407,9 @@ function advancePlayer(player: RoomPlayerState, delta: number, elapsed: number):
     grabCooldownUntil: gripJump
       ? Math.max(player.grabCooldownUntil, elapsed + STRUCTURE_GRIP.releaseCooldown)
       : player.grabCooldownUntil,
-    // Unused intent expires with the tick, so an airborne press cannot buffer a later takeoff.
-    queuedJumpSequence: 0,
+    // A fresh landing edge survives briefly; consume once and never refresh a held input.
+    queuedJumpSequence: pendingJump && !takeoff ? player.queuedJumpSequence : 0,
+    queuedJumpUntil: pendingJump && !takeoff ? player.queuedJumpUntil : 0,
     lastAcknowledgedJump: takeoff ? player.queuedJumpSequence : player.lastAcknowledgedJump,
   }
 }
@@ -909,7 +916,7 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
   for (const [id, player] of Object.entries(room.players)) {
     // Eliminated and escaped runners no longer consume movement or jump intent.
     advanced[id] = !player.alive || player.escaped
-      ? { ...player, queuedJumpSequence: 0 }
+      ? { ...player, queuedJumpSequence: 0, queuedJumpUntil: 0 }
       : advancePlayer(player, delta, elapsed)
   }
 
@@ -965,6 +972,7 @@ export function stepRoom(room: AuthoritativeRoomState, deltaSeconds: number): Au
         alive: false,
         velocityY: 0,
         queuedJumpSequence: 0,
+        queuedJumpUntil: 0,
         grip: moved.grip,
       }] as const
     }

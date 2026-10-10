@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { PLAYGROUND_ROUTE } from './playground'
 import {
   DEFAULT_CAMERA_ORBIT,
   MAX_CAMERA_PITCH,
@@ -11,6 +12,12 @@ import {
 } from './camera'
 
 describe('pointer-lock third-person camera', () => {
+  it('starts facing the next foothold so W and jump follow the visible climb route', () => {
+    const dx = PLAYGROUND_ROUTE[1].x - PLAYGROUND_ROUTE[0].x
+    const dz = PLAYGROUND_ROUTE[1].z - PLAYGROUND_ROUTE[0].z
+    const forward = rotateMovementByCamera({ x: 0, z: -1 }, DEFAULT_CAMERA_ORBIT.yaw)
+    expect((forward.x * dx + forward.z * dz) / Math.hypot(dx, dz)).toBeGreaterThan(0.99)
+  })
   it('applies bounded sensitivity and inverted Y without changing wheel zoom', () => {
     const input = { deltaX: 20, deltaY: 20, zoomDelta: 100 }
     const normal = updateCameraOrbitInPlace({ ...DEFAULT_CAMERA_ORBIT }, input)
@@ -53,6 +60,13 @@ describe('pointer-lock third-person camera', () => {
     expect(isUsableInitialPointerLookDelta(-182.5, 0)).toBe(false)
     expect(isUsableInitialPointerLookDelta(0, 0)).toBe(false)
     expect(isUsableInitialPointerLookDelta(0, Number.NaN)).toBe(false)
+    expect(isUsableInitialPointerLookDelta(20, -10)).toBe(true)
+  })
+
+  it('ignores even bounded cursor warp during lock transition, then accepts real look', () => {
+    expect(isUsableInitialPointerLookDelta(100, 100, 20)).toBe(false)
+    expect(isUsableInitialPointerLookDelta(20, -10, 80)).toBe(false)
+    expect(isUsableInitialPointerLookDelta(20, -10, 150)).toBe(true)
   })
 
   it('handles pointer-lock rejection and activates fallback exactly once', async () => {

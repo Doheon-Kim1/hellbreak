@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_GAME_SETTINGS, normalizeGameSettings, loadGameSettings, saveGameSettings, GAME_SETTINGS_KEY } from './settings'
 
 describe('browser game preferences', () => {
+  it('shows the key guide by default and persists an explicit off preference', () => {
+    expect(normalizeGameSettings({}).showGuide).toBe(true)
+    expect(normalizeGameSettings({ showGuide: false }).showGuide).toBe(false)
+    expect(normalizeGameSettings({ showGuide: 'false' }).showGuide).toBe(true)
+    const values = new Map<string, string>()
+    const storage = { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) } }
+    saveGameSettings(storage, { ...DEFAULT_GAME_SETTINGS, showGuide: false })
+    expect(loadGameSettings(storage).showGuide).toBe(false)
+  })
   it('bounds persisted sensitivity and audio levels without trusting invalid types', () => {
     expect(normalizeGameSettings({ sensitivity: 99, masterVolume: -1, effectsVolume: NaN,
       ambientVolume: 'loud', muted: 'false', invertY: true })).toEqual({ ...DEFAULT_GAME_SETTINGS,

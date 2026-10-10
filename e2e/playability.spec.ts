@@ -70,6 +70,7 @@ test('real audio graph emits sound and mutes its output', async ({ page }) => {
     } as typeof AudioNode.prototype.connect
   })
   await page.goto('/', { waitUntil: 'networkidle' })
+  await page.bringToFront()
   await page.getByRole('button', { name: '설정', exact: true }).click()
   await page.getByRole('button', { name: '효과음 미리 듣기' }).click()
   await expect.poll(() => page.evaluate(() => (window as unknown as { audioEvidence: { peak: number } }).audioEvidence.peak))
@@ -116,7 +117,11 @@ test('local Space takes off, lands, and can jump again after restart', async ({ 
   await expect(canvas).toHaveAttribute('data-local-jump-ack', '1')
   await expect.poll(async () => Number(await canvas.getAttribute('data-observed-peak'))).toBeGreaterThan(before + 0.2)
   await expect(canvas).toHaveAttribute('data-local-grounded', 'true', { timeout: 5000 })
+  const sampleBeforeRestart = Number(await canvas.getAttribute('data-local-position-sample'))
   await page.getByRole('button', { name: '경기 재시작' }).click()
+  // Wait for new actual-body samples after restart, not the previous landing's cached flag.
+  await expect.poll(async () => Number(await canvas.getAttribute('data-local-position-sample')))
+    .toBeGreaterThan(sampleBeforeRestart + 4)
   await expect(canvas).toHaveAttribute('data-local-grounded', 'true')
   await page.keyboard.press('Space')
   await expect(canvas).toHaveAttribute('data-local-jump-ack', '2')
@@ -141,8 +146,17 @@ test('settings persist and editing controls cannot move or jump the online playe
   await expect(page.locator('.key-art')).toHaveCount(0, { timeout: 15000 })
   const own = page.locator('[data-testid="network-player"][data-own="true"]')
   await expect(own).toHaveAttribute('data-grounded', 'true')
+  await expect(own).toHaveAttribute('data-alive', 'true')
   const before = await own.evaluate((node) => ({ x: node.getAttribute('data-x'), y: node.getAttribute('data-y'), z: node.getAttribute('data-z') }))
+  const canvas = page.locator('canvas')
+  await canvas.evaluate((node) => { (node as HTMLCanvasElement).dataset.pointerLockDenied = 'true' })
+  const yawBeforeDrag = Number(await canvas.getAttribute('data-camera-yaw'))
+  await canvas.dispatchEvent('mousedown', { button: 2, clientX: 100, clientY: 100 })
+  await page.evaluate(() => document.dispatchEvent(new MouseEvent('mousemove', { clientX: 120, clientY: 100 })))
+  await expect(canvas).toHaveAttribute('data-camera-yaw', (yawBeforeDrag - 20 * 0.0028 * 0.5).toFixed(6))
+  // Opening settings while this right-drag is active must cancel it, before the live match ages.
   await page.getByRole('button', { name: '설정', exact: true }).click()
+  const yawWhenOpened = await canvas.getAttribute('data-camera-yaw')
   const timeBefore = await page.getByTestId('online-timer').textContent()
   await own.evaluate((node) => {
     new MutationObserver(() => {
@@ -160,16 +174,7 @@ test('settings persist and editing controls cannot move or jump the online playe
   await expect(own).toHaveAttribute('data-x', before.x!)
   await expect(own).toHaveAttribute('data-y', before.y!)
   await expect(own).toHaveAttribute('data-z', before.z!)
-  await page.getByRole('button', { name: '설정 닫기' }).click()
-  await page.locator('canvas').evaluate((canvas) => { (canvas as HTMLCanvasElement).dataset.pointerLockDenied = 'true' })
-  const canvas = page.locator('canvas')
-  await canvas.dispatchEvent('mousedown', { button: 2, clientX: 100, clientY: 100 })
-  await page.evaluate(() => document.dispatchEvent(new MouseEvent('mousemove', { clientX: 120, clientY: 100 })))
-  await expect(canvas).toHaveAttribute('data-camera-yaw', '0.701900')
-  // Opening settings while a right-drag is in progress must cancel that gesture as well.
-  await page.getByRole('button', { name: '설정', exact: true }).click()
-  // Moving the real mouse to this button can legitimately rotate before the dialog opens.
-  const yawWhenOpened = await canvas.getAttribute('data-camera-yaw')
+  await expect(own).toHaveAttribute('data-alive', 'true')
   await page.getByRole('button', { name: '설정 닫기' }).click()
   await page.evaluate(() => document.dispatchEvent(new MouseEvent('mousemove', { clientX: 140, clientY: 100 })))
   await expect(canvas).toHaveAttribute('data-camera-yaw', yawWhenOpened!)

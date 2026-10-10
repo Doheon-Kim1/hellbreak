@@ -173,7 +173,13 @@ export function PlayerCharacter({
     }
   }, [anchors, ownedAnchors, playerId])
 
-  useEffect(() => () => onPose?.(playerId, null, ''), [onPose, playerId])
+  useEffect(() => {
+    // Effect replay clears the consumer readout without remounting these refs.
+    // Re-arm publication so the next actual rig frame restores an unchanged idle pose too.
+    lastReportedPose.current = null
+    lastReportedRescueLink.current = ''
+    return () => onPose?.(playerId, null, '')
+  }, [onPose, playerId])
 
   useFrame(() => {
     const next = updatePlayerCharacterPose(frame.current, pose.current, scale)

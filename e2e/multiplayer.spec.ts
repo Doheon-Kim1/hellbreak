@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Locator, Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
 import { Client } from '@colyseus/sdk'
 import { Decoder } from '@colyseus/schema'
 import { Protocol } from '@colyseus/shared-types'
@@ -27,6 +27,8 @@ interface RescueReadoutProbe {
   semanticFrameObserved: boolean
   rescuerRigObserved: boolean
   targetRigObserved: boolean
+  notice: string
+  grabAck: number
   /** The most recent frame, quoted verbatim when the latch never closed. */
   last: string
 }
@@ -62,6 +64,8 @@ async function watchRescueReadout(
       semanticFrameObserved: false,
       rescuerRigObserved: false,
       targetRigObserved: false,
+      notice: '',
+      grabAck: 0,
       last: 'nothing sampled',
     }
     ;(window as unknown as { __rescueReadout: typeof probe }).__rescueReadout = probe
@@ -88,6 +92,9 @@ async function watchRescueReadout(
           ?.getAttribute('data-grip-band') ?? 'unmounted',
       }
       probe.last = JSON.stringify(frame)
+      const notice = document.querySelector('[data-testid="rescue-notice"]')?.textContent ?? ''
+      if (/구조 시작|구조 성공|구조 실패|그립 소진/.test(notice)) probe.notice = notice
+      probe.grabAck = Math.max(probe.grabAck, Number(document.querySelector('[data-testid="network-player"][data-own="true"]')?.getAttribute('data-grab-ack') ?? '0'))
       const schemaMatches = frame.grabTarget === targetId && frame.grabbedBy === rescuerId
       const rescuerPoseMatches = frame.rescuerVisualLink === targetId
         && frame.rescuerPose === 'rescuing'
@@ -107,6 +114,7 @@ async function watchRescueReadout(
     new MutationObserver(read).observe(document.body, {
       subtree: true,
       childList: true,
+      characterData: true,
       attributes: true,
     })
   }, link)
@@ -117,6 +125,8 @@ test.describe.configure({ timeout: 90_000 })
 async function openOnlineTab(page: Page) {
   await page.goto('/', { waitUntil: 'networkidle' })
   await page.getByRole('button', { name: '온라인', exact: true }).click()
+  // GPU/world initialization must finish before the server-owned match clock starts.
+  await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true', { timeout: 20000 })
 }
 
 /** The room only forwards input once the 3D scene renders, because that gates the send loop. */
@@ -296,11 +306,13 @@ test('two browsers create, join, synchronize movement, and leave a room', async 
     // Compile and reveal both online clients before the authoritative match clock starts.
     await openOnlineTab(pageA)
     await openOnlineTab(pageB)
+    await pageA.bringToFront()
     await pageA.getByRole('button', { name: '온라인 룸 만들기' }).click()
     await expect(pageA.getByTestId('player-count')).toContainText('참가자 1/6')
     const roomId = await pageA.getByTestId('room-id').innerText()
     expect(roomId).not.toBe('')
 
+    await pageB.bringToFront()
     await pageB.getByLabel('룸 ID').fill(roomId)
     await pageB.getByRole('button', { name: '참가', exact: true }).click()
 
@@ -308,60 +320,57 @@ test('two browsers create, join, synchronize movement, and leave a room', async 
     await expect(pageB.getByTestId('player-count')).toContainText('참가자 2/6')
     await expect(pageA.getByTestId('network-player')).toHaveCount(2)
     await expect(pageB.getByTestId('network-player')).toHaveCount(2)
-    await pageA.screenshot({ path: 'test-results/multiplayer-connected.png', fullPage: true })
 
-    const ownA = pageA.locator('[data-testid="network-player"][data-own="true"]')
-    const ownPlayerId = await ownA.getAttribute('data-player-id')
-    expect(ownPlayerId).toBeTruthy()
-    await expect(ownA).toHaveAttribute('data-character-model', 'infernal-climber')
-    await expect(ownA).toHaveAttribute('data-character-pose', 'idle')
-    const before = await ownA.innerText()
-    const mirroredA = pageB.locator(`[data-testid="network-player"][data-player-id="${ownPlayerId}"]`)
-    await expect(mirroredA).toHaveAttribute('data-character-model', 'infernal-climber')
-    const mirroredBefore = await mirroredA.innerText()
-
-    await waitForOnlineScene(pageA)
     await pageA.bringToFront()
-    const canvasA = pageA.locator('canvas')
-    const startX = Number(await ownA.getAttribute('data-x'))
-    const startZ = Number(await ownA.getAttribute('data-z'))
-    await pageA.getByRole('button', { name: '마우스 조작 시작' }).click()
-    await expect.poll(() => pageA.evaluate(() => document.pointerLockElement?.tagName ?? ''))
-      .toBe('CANVAS')
-    await pageA.waitForTimeout(320)
-    const initialYaw = Number(await canvasA.getAttribute('data-camera-yaw'))
-    await pageA.evaluate(() => {
-      for (let index = 0; index < 20; index += 1) {
-        const event = new MouseEvent('mousemove', { bubbles: true })
-        Object.defineProperty(event, 'movementX', { value: 20 })
-        Object.defineProperty(event, 'movementY', { value: 0 })
-        document.dispatchEvent(event)
-      }
-    })
-    await expect.poll(async () => Math.abs(
-      Number(await canvasA.getAttribute('data-camera-yaw')) - initialYaw,
-    )).toBeGreaterThan(0.1)
+    const ownA = pageA.locator('[data-testid="network-player"][data-own="true"]')
+    await expect(ownA).toHaveAttribute('data-character-model', 'infernal-climber', { timeout: SCENE_TIMEOUT_MS })
+    const readStart = (page: Page, owner: boolean) => page.evaluate((isOwner) => {
+      const node = document.querySelector(`[data-testid="network-player"][data-own="${isOwner}"]`)!
+      const canvas = document.querySelector<HTMLCanvasElement>('canvas')!
+      return { id: node.getAttribute('data-player-id'), model: node.getAttribute('data-character-model'),
+        pose: node.getAttribute('data-character-pose'), alive: node.getAttribute('data-alive'),
+        text: node.textContent, x: Number(node.getAttribute('data-x')), z: Number(node.getAttribute('data-z')),
+        yaw: Number(canvas.dataset.cameraYaw), ready: canvas.dataset.sceneReady,
+        covered: Boolean(document.querySelector('.key-art')) }
+    }, owner)
+    // Read whole start evidence coherently, not via locator evaluation's extra auto-wait trips.
+    const [initial, peerInitial] = await Promise.all([readStart(pageA, true), readStart(pageB, false)])
+    const ownPlayerId = initial.id
+    expect(ownPlayerId).toBeTruthy()
+    expect(peerInitial.id).toBe(ownPlayerId)
+    expect(initial.model).toBe('infernal-climber')
+    expect(initial.pose).toBe('idle')
+    expect(initial.alive).toBe('true')
+    expect(initial.ready).toBe('true')
+    expect(initial.covered).toBe(false)
+    expect(Number.isFinite(initial.x) && Number.isFinite(initial.z) && Number.isFinite(initial.yaw)).toBe(true)
+    const before = initial.text
+    const mirroredA = pageB.locator(`[data-testid="network-player"][data-player-id="${ownPlayerId}"]`)
+    const mirroredBefore = peerInitial.text
+    const startX = initial.x
+    const startZ = initial.z
+    // Native keyboard intent precedes extra cosmetic reads; the server's lava clock stays real.
+    const yaw = initial.yaw
     await pageA.keyboard.down('KeyW')
     try {
-      await expect.poll(async () => {
-        const movedX = Number(await ownA.getAttribute('data-x')) - startX
-        const movedZ = Number(await ownA.getAttribute('data-z')) - startZ
-        const yaw = Number(await canvasA.getAttribute('data-camera-yaw'))
-        return movedX * -Math.sin(yaw) + movedZ * -Math.cos(yaw)
-      }, {
-        timeout: INPUT_OBSERVATION_MS,
-      }).toBeGreaterThan(0.25)
-      await expect.poll(async () => (await ownA.innerText()) !== before, {
-        timeout: INPUT_OBSERVATION_MS,
-      }).toBe(true)
-      await pageB.bringToFront()
-      await expect.poll(async () => (await mirroredA.innerText()) !== mirroredBefore, {
-        timeout: INPUT_OBSERVATION_MS,
-      }).toBe(true)
+      await expect.poll(() => ownA.evaluate((node, start) => {
+        const x = Number(node.getAttribute('data-x')), z = Number(node.getAttribute('data-z'))
+        return (x - start.x) * -Math.sin(start.yaw) + (z - start.z) * -Math.cos(start.yaw)
+      }, { x: startX, z: startZ, yaw }), { timeout: INPUT_OBSERVATION_MS }).toBeGreaterThan(0.25)
     } finally {
-      await pageA.bringToFront()
       await pageA.keyboard.up('KeyW')
     }
+    await expect.poll(async () => (await ownA.innerText()) !== before).toBe(true)
+    await pageB.bringToFront()
+    await expect.poll(() => mirroredA.evaluate((node, start) => {
+      const x = Number(node.getAttribute('data-x')), z = Number(node.getAttribute('data-z'))
+      return (x - start.x) * -Math.sin(start.yaw) + (z - start.z) * -Math.cos(start.yaw)
+    }, { x: startX, z: startZ, yaw }), { timeout: INPUT_OBSERVATION_MS }).toBeGreaterThan(0.25)
+    await expect(mirroredA).toHaveAttribute('data-character-model', 'infernal-climber')
+    await expect.poll(async () => (await mirroredA.innerText()) !== mirroredBefore).toBe(true)
+
+    // Capture cosmetics only after genuine input and mirrored displacement beat the live lava clock.
+    await pageA.screenshot({ path: 'test-results/multiplayer-connected.png', fullPage: true })
 
     await pageB.bringToFront()
     await pageB.getByRole('button', { name: '룸 나가기' }).click()
@@ -402,77 +411,70 @@ test('one shared room drives server jump physics and the match HUD in both brows
   try {
     await openOnlineTab(pageA)
     await openOnlineTab(pageB)
+    await pageA.bringToFront()
     await pageA.getByRole('button', { name: '온라인 룸 만들기' }).click()
     await expect(pageA.getByTestId('player-count')).toContainText('참가자 1/6')
     const roomId = await pageA.getByTestId('room-id').innerText()
+    await pageB.bringToFront()
     await pageB.getByLabel('룸 ID').fill(roomId)
     await pageB.getByRole('button', { name: '참가', exact: true }).click()
     await expect(pageA.getByTestId('network-player')).toHaveCount(2)
     await expect(pageB.getByTestId('room-id')).toHaveText(roomId)
     await pageA.bringToFront()
-    await waitForOnlineScene(pageA)
-    const ownA = pageA.locator('[data-testid="network-player"][data-own="true"]')
-    const ownB = pageB.locator('[data-testid="network-player"][data-own="true"]')
-    const pose = (row: Element) => ({ id: row.getAttribute('data-player-id')!,
-      y: Number(row.getAttribute('data-y')), grounded: row.getAttribute('data-grounded') === 'true',
-      alive: row.getAttribute('data-alive') === 'true', ack: Number(row.getAttribute('data-jump-ack')) })
-    const [startA, startB] = await Promise.all([ownA.evaluate(pose), ownB.evaluate(pose)])
+    // One coherent browser trip captures each real row/HUD and installs its landing observer.
+    // Software WebGL makes many serialized locator reads consume the entire live lava window.
+    const observe = (page: Page, owner: boolean) => page.evaluate((isOwner) => {
+      const row = document.querySelector(`[data-testid="network-player"][data-own="${isOwner}"]`)!
+      const own = document.querySelector('[data-testid="network-player"][data-own="true"]')!
+      const pose = (node: Element) => ({ id: node.getAttribute('data-player-id')!,
+        y: Number(node.getAttribute('data-y')), grounded: node.getAttribute('data-grounded') === 'true',
+        alive: node.getAttribute('data-alive') === 'true', ack: Number(node.getAttribute('data-jump-ack')) })
+      const hud = () => ({
+        alive: document.querySelector('[data-testid="online-alive"]')?.textContent,
+        eliminations: document.querySelector('[data-testid="online-eliminations"]')?.textContent,
+        time: document.querySelector('[data-testid="online-timer"]')?.textContent ?? '',
+        lava: document.querySelector('[data-testid="online-lava"]')?.textContent ?? '',
+      })
+      const start = pose(row), idle = pose(own), initialHud = hud()
+      const read = () => {
+        const current = pose(row), currentHud = hud()
+        if (current.ack > 0) row.setAttribute('data-observed-jump-ack', String(current.ack))
+        // Latch only simultaneous genuine supported landing/HUD; wire ascent is asserted separately.
+        if (current.ack > 0 && current.alive && current.grounded
+          && Math.abs(current.y - start.y) < 0.1 && currentHud.alive === '2'
+          && currentHud.eliminations === '0' && currentHud.time !== initialHud.time
+          && row.getAttribute('data-observed-landing') !== 'true') {
+          row.setAttribute('data-observed-landing-hud', JSON.stringify({ ...currentHud, own: pose(own) }))
+          row.setAttribute('data-observed-landing', 'true')
+        }
+      }
+      new MutationObserver(read).observe(document.body, { attributes: true, childList: true,
+        characterData: true, subtree: true,
+        attributeFilter: ['data-y', 'data-grounded', 'data-jump-ack', 'data-alive'] })
+      return { start, idle, hud: initialHud }
+    }, owner)
+    const [evidenceA, evidenceB] = await Promise.all([observe(pageA, true), observe(pageB, false)])
+    const startA = evidenceA.start, startB = evidenceB.idle
+    const hudA = evidenceA.hud, hudB = evidenceB.hud
+    expect(evidenceB.start.id).toBe(startA.id)
     expect(startA.id).toBeTruthy()
     expect(startB.id).toBeTruthy()
     expect(Number.isFinite(startA.y) && Number.isFinite(startB.y)).toBe(true)
     expect(startA.id).not.toBe(startB.id)
     expect(startA).toMatchObject({ grounded: true, alive: true, ack: 0 })
     expect(startB).toMatchObject({ grounded: true, alive: true, ack: 0 })
-    const hud = (page: Page) => page.evaluate(() => ({
-      alive: document.querySelector('[data-testid="online-alive"]')?.textContent,
-      eliminations: document.querySelector('[data-testid="online-eliminations"]')?.textContent,
-      time: document.querySelector('[data-testid="online-timer"]')?.textContent ?? '',
-      lava: document.querySelector('[data-testid="online-lava"]')?.textContent ?? '',
-    }))
-    // Read whole HUDs coherently before the jump, rather than making slow per-field browser trips
-    // while the real server's lava continues rising. Neither room time nor gameplay is mocked.
-    const [hudA, hudB] = await Promise.all([hud(pageA), hud(pageB)])
     expect(hudA).toMatchObject({ alive: '2', eliminations: '0' })
     expect(hudB).toMatchObject({ alive: '2', eliminations: '0' })
     const clockBeforeJump = clockSeconds(hudA.time)
     expect(clockBeforeJump).toBeGreaterThan(0)
     expect(clockBeforeJump).toBeLessThanOrEqual(180)
     expect(Math.abs(clockBeforeJump - clockSeconds(hudB.time))).toBeLessThanOrEqual(2)
+    const ownA = pageA.locator('[data-testid="network-player"][data-own="true"]')
     const mirrored = pageB.locator(`[data-testid="network-player"][data-player-id="${startA.id}"]`)
-    const watchLanding = (runner: Locator) => runner.evaluate((row, { takeoffY, timeBefore }) => {
-      const read = () => {
-        const ack = Number(row.getAttribute('data-jump-ack'))
-        if (ack > 0) row.setAttribute('data-observed-jump-ack', String(ack))
-
-        // All facts must coexist in one real published row. The observer only remembers them;
-        // it never writes authoritative attributes, sends input, or changes game time.
-        if (ack > 0 && row.getAttribute('data-alive') === 'true'
-          && row.getAttribute('data-grounded') === 'true'
-          && Math.abs(Number(row.getAttribute('data-y')) - takeoffY) < 0.1) {
-          const alive = document.querySelector('[data-testid="online-alive"]')?.textContent
-          const eliminations = document.querySelector('[data-testid="online-eliminations"]')?.textContent
-          const time = document.querySelector('[data-testid="online-timer"]')?.textContent ?? ''
-          const lava = document.querySelector('[data-testid="online-lava"]')?.textContent ?? ''
-          const own = document.querySelector('[data-testid="network-player"][data-own="true"]')!
-          // Latch transient HUD evidence at landing, not after slow secondary-tab round trips.
-          if (alive === '2' && eliminations === '0' && time !== timeBefore
-            && row.getAttribute('data-observed-landing') !== 'true') {
-            row.setAttribute('data-observed-landing-hud', JSON.stringify({ alive, eliminations, time, lava,
-              own: { ack: Number(own.getAttribute('data-jump-ack')), y: Number(own.getAttribute('data-y')),
-                grounded: own.getAttribute('data-grounded') === 'true', alive: own.getAttribute('data-alive') === 'true' } }))
-            row.setAttribute('data-observed-landing', 'true')
-          }
-        }
-      }
-      new MutationObserver(read).observe(document.body, { attributes: true, childList: true, subtree: true,
-        attributeFilter: ['data-y', 'data-grounded', 'data-jump-ack', 'data-alive'] })
-    }, { takeoffY: startA.y, timeBefore: hudA.time })
-    await Promise.all([watchLanding(ownA), watchLanding(mirrored)])
-    await pageA.locator('canvas').click({ position: { x: 20, y: 20 } })
+    // Playing mode's top-left canvas is beneath the HUD; use an unobstructed native click.
+    await pageA.locator('canvas').click({ position: { x: 840, y: 420 } })
     let acknowledged = 0
     for (let press = 0; press < JUMP_PRESS_ATTEMPTS && acknowledged === 0; press += 1) {
-      await expect(ownA).toHaveAttribute('data-alive', 'true')
-      await expect(ownA).toHaveAttribute('data-grounded', 'true')
       await pageA.keyboard.press('Space')
       await expect.poll(async () => Number(await ownA.getAttribute('data-observed-jump-ack')),
         { timeout: INPUT_OBSERVATION_MS, intervals: [100] }).toBeGreaterThan(0).catch(() => undefined)
@@ -511,11 +513,11 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
   const page = await context.newPage()
   const pageErrors: string[] = []
   page.on('pageerror', (error) => pageErrors.push(error.message))
+  await openOnlineTab(page)
   const room = await new Client('http://127.0.0.1:2567')
     .create<HellbreakRoomState>(HELLBREAK_ROOM_NAME)
 
   try {
-    await openOnlineTab(page)
     await page.getByLabel('룸 ID').fill(room.roomId)
     await page.getByRole('button', { name: '참가', exact: true }).click()
     await expect(page.getByTestId('player-count')).toContainText('참가자 2/6')
@@ -535,22 +537,26 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
 
     // The browser sends only held rescue. The second client sends only a normal jump edge; neither can
     // name a rescue target or submit a pose, force, or grip value.
-    // Walk the SDK player into the browser's default -X/-Z camera cone using ordinary server input.
+    // Walk into the actual first-climb (+X/-Z) view cone using only ordinary server input.
+    const sdkStart = room.state.players.get(jumperId)!
+    const targetX = Number(await rescuer.getAttribute('data-x')) + 0.7
+    const targetZ = Number(await rescuer.getAttribute('data-z')) - 0.7
+    const walkYaw = Math.atan2(-(targetX - sdkStart.x), -(targetZ - sdkStart.z))
     room.send('input', {
       sequence: 1,
       forward: true,
       backward: false,
       left: false,
-      right: true,
+      right: false,
       sprint: false,
       jump: false,
       grab: false,
-      cameraYaw: 0,
+      cameraYaw: walkYaw,
     })
     await expect.poll(() => room.state.players.get(jumperId)?.x ?? -26, {
       timeout: INPUT_OBSERVATION_MS,
       intervals: [25],
-    }).toBeGreaterThan(-25.6)
+    }).toBeGreaterThan(targetX)
     room.send('input', {
       sequence: 2,
       forward: false,
@@ -602,10 +608,14 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
     })
     await expect(canvas).not.toHaveAttribute('data-pointer-lock-denied')
 
-    const yawBeforeAcquisition = await canvas.getAttribute('data-camera-yaw')
-    expect(yawBeforeAcquisition).not.toBeNull()
     const canvasBox = await canvas.boundingBox()
     expect(canvasBox).not.toBeNull()
+    const yawBeforeHover = await canvas.getAttribute('data-camera-yaw')
+    await page.mouse.move(canvasBox!.x + canvasBox!.width * 0.75, canvasBox!.y + canvasBox!.height * 0.65)
+    // Free-cursor motion genuinely rotates now. Separate that motion from lock acquisition itself.
+    await expect(canvas).not.toHaveAttribute('data-camera-yaw', yawBeforeHover!)
+    const yawBeforeAcquisition = await canvas.getAttribute('data-camera-yaw')
+    expect(yawBeforeAcquisition).not.toBeNull()
     await canvas.click({
       force: true,
       position: {
@@ -699,17 +709,16 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
         `the room never published the rescue link; camera ${JSON.stringify(cameraDiagnostic)}`,
       ).toBe(true)
       expect(readoutObserved, `no coherent rescue readout; last frame ${readout.last}`).toBe(true)
-      // Milestones, and only milestones, reach the live region: never a per-frame grip value.
-      await expect(page.getByTestId('rescue-notice'))
-        .toHaveText(/구조 시작|구조 성공|구조 실패|그립 소진/)
+      // A notice genuinely rendered during rescue is latched before game-over unmounts that HUD.
+      expect(readout.notice).toMatch(/구조 시작|구조 성공|구조 실패|그립 소진/)
       await page.mouse.up({ button: 'left' })
-      const acknowledgedGrab = Number(await rescuer.getAttribute('data-grab-ack'))
+      const acknowledgedGrab = readout.grabAck
       expect(acknowledgedGrab).toBeGreaterThan(initialGrabAck)
       await expect.poll(() => room.state.players.get(rescuerId)?.lastAcknowledgedGrab ?? 0, {
         timeout: INPUT_OBSERVATION_MS,
       }).toBeGreaterThanOrEqual(acknowledgedGrab)
-      // The target started to the rescuer's left; the room-owned pull must move it toward +X.
-      expect(room.state.players.get(jumperId)?.x ?? rescueStartX).toBeGreaterThan(rescueStartX + 0.02)
+      // The target now starts forward-right in the corrected view cone: room-owned pull moves -X.
+      expect(room.state.players.get(jumperId)?.x ?? rescueStartX).toBeLessThan(rescueStartX - 0.02)
     } finally {
       await page.mouse.up({ button: 'left' })
     }

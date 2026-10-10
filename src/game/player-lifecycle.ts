@@ -1,3 +1,7 @@
+export function localPhysicsPaused(started: boolean, sceneReady: boolean, settingsOpen: boolean): boolean {
+  return !started || !sceneReady || settingsOpen
+}
+
 export type GameCameraMode = 'player' | 'spectator'
 
 export interface PlayerPresentationInput {

@@ -488,6 +488,42 @@ describe('server-owned match, lava, and outcome', () => {
     expect(room.players['runner-1'].grounded).toBe(false)
   })
 
+  it('buffers a fresh jump just before landing on the actual ground floor', () => {
+    let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+    room = placeRunner(room, 'runner-1', { x: 35, z: 35,
+      y: PLAYGROUND_GROUND_TOP + PLAYER_HALF_HEIGHT + 0.05, grounded: false, velocityY: -2 })
+    room = applyPlayerInput(room, 'session-a', { sequence: 1, jump: true })
+    room = stepRoom(room, 0.05)
+    expect(room.players['runner-1'].grounded).toBe(true)
+    room = stepRoom(room, 0.05)
+    expect(room.players['runner-1'].lastAcknowledgedJump).toBe(1)
+    expect(room.players['runner-1'].velocityY).toBeGreaterThan(0)
+    expect(room.players['runner-1'].y).toBeGreaterThan(PLAYGROUND_GROUND_TOP + PLAYER_HALF_HEIGHT)
+  })
+
+  it('expires an early airborne press and cannot refresh it with held or forged deadlines', () => {
+    let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
+    room = placeRunner(room, 'runner-1', { x: 35, z: 35, y: 5, grounded: false, velocityY: 0 })
+    room = applyPlayerInput(room, 'session-a', { sequence: 1, jump: true,
+      queuedJumpUntil: 99999 } as PlayerInputCommand)
+    const deadline = room.players['runner-1'].queuedJumpUntil
+    for (let tick = 0; tick < 2; tick += 1) {
+      room = stepRoom(room, 0.05)
+      room = applyPlayerInput(room, 'session-a', { sequence: tick + 2, jump: true })
+      expect(room.players['runner-1'].queuedJumpUntil).toBe(deadline)
+    }
+    for (let tick = 0; tick < 2; tick += 1) room = stepRoom(room, 0.05)
+    expect(room.players['runner-1'].queuedJumpSequence).toBe(0)
+    room = applyPlayerInput(room, 'session-a', { sequence: 4, jump: true })
+    room = stepRoom(room, 0.05)
+    expect(room.players['runner-1'].queuedJumpSequence).toBe(0)
+    expect(room.players['runner-1'].lastAcknowledgedJump).toBe(0)
+    room = stepUntil(room, (state) => state.players['runner-1'].grounded)
+    room = stepRoom(room, 0.05)
+    expect(room.players['runner-1'].grounded).toBe(true)
+    expect(room.players['runner-1'].lastAcknowledgedJump).toBe(0)
+  })
+
   it('ignores a held jump while airborne instead of boosting again', () => {
     let room = joinRoom(createRoomState(), 'runner-1', 'session-a')
     room = applyPlayerInput(room, 'session-a', { sequence: 1, jump: true })
@@ -545,7 +581,7 @@ describe('server-owned match, lava, and outcome', () => {
     room = stepRoom(room, 0.05)
     expect(room.players['runner-1'].lastAcknowledgedJump).toBe(1)
 
-    // A fresh mid-air edge is discarded instead of buffering into a later takeoff.
+    // A fresh early mid-air edge expires before landing; it never boosts the airborne runner.
     room = applyPlayerInput(room, 'session-a', { sequence: 3, jump: false })
     room = applyPlayerInput(room, 'session-a', { sequence: 4, jump: true })
     room = stepRoom(room, 0.05)

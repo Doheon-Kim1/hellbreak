@@ -34,7 +34,7 @@ import {
   rescueRopeSagOffset,
   rescueRopeVisual,
 } from '../game/rescue-rope-visuals'
-import { frameHasVisibleScene, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
+import { frameHasVisibleScene, localPhysicsPaused, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
 import { PLAYGROUND_PLATFORM_THICKNESS } from '../game/playground'
 import { gripAnchorById } from '../game/grip-anchors'
@@ -51,6 +51,9 @@ import type {
 import { GiantPlayground } from './GiantPlayground'
 import { MultiplayerLobby } from './MultiplayerLobby'
 import { SettingsDialog } from './SettingsDialog'
+import { ControlGuide } from './ControlGuide'
+import { refreshFootContacts } from '../game/local-grounding'
+import { JumpBuffer } from '../game/jump-buffer'
 import { DEFAULT_GAME_SETTINGS, loadGameSettings, saveGameSettings } from '../game/settings'
 import type { GameSettings } from '../game/settings'
 import { useGameAudio } from '../game/use-game-audio'
@@ -223,7 +226,9 @@ function GameCamera({
     let drag: { pointerId: number; x: number; y: number } | null = null
     let mouseDrag: { x: number; y: number } | null = null
     let pointerLookCalibrated = true
-    let cameraResetPendingGrab = false
+    let acquiringPointerLock = false
+    let pointerLockedAt = -Infinity
+
     let primaryMouseDown = false
 
     const setMouseGrab = (pressed: boolean) => {
@@ -239,6 +244,7 @@ function GameCamera({
     const clearMouseGrab = () => setMouseGrab(false)
     const clearMouseInput = () => {
       primaryMouseDown = false
+      acquiringPointerLock = false
       mouseDrag = null
       if (drag && canvas.hasPointerCapture(drag.pointerId)) canvas.releasePointerCapture(drag.pointerId)
       drag = null
@@ -264,13 +270,6 @@ function GameCamera({
       if (event.button === 0) {
         primaryMouseDown = true
         if (document.pointerLockElement === canvas) {
-          if (cameraResetPendingGrab) {
-            orbit.current.yaw = DEFAULT_CAMERA_ORBIT.yaw
-            orbit.current.pitch = DEFAULT_CAMERA_ORBIT.pitch
-            cameraResetPendingGrab = false
-            canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
-            canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
-          }
           setMouseGrab(true)
         } else if (
           canvas.dataset.pointerLockDenied === 'true'
@@ -280,9 +279,11 @@ function GameCamera({
           setMouseGrab(true)
         } else {
           // The acquisition gesture is focus-only. Grabbing begins on the next locked press.
+          acquiringPointerLock = true
           void requestPointerLockSafely(
             () => canvas.requestPointerLock(),
             () => {
+              acquiringPointerLock = false
               canvas.dataset.pointerLockDenied = 'true'
               if (primaryMouseDown) setMouseGrab(true)
             },
@@ -303,10 +304,11 @@ function GameCamera({
     }
     const onMouseMove = (event: MouseEvent) => {
       if (!active || controls.blocked.current) return
+      // Native events can be delivered late under WebGL load; use event timestamps, not wall delay.
+      if (acquiringPointerLock) return
       if (document.pointerLockElement === canvas) {
-        if (canvas.dataset.grabHeld === 'true' || cameraResetPendingGrab) return
         if (!pointerLookCalibrated) {
-          if (!isUsableInitialPointerLookDelta(event.movementX, event.movementY)) return
+          if (!isUsableInitialPointerLookDelta(event.movementX, event.movementY, event.timeStamp - pointerLockedAt)) return
           pointerLookCalibrated = true
         }
         applyLookDelta(
@@ -315,7 +317,14 @@ function GameCamera({
         )
         return
       }
-      if (!mouseDrag) return
+      if (!mouseDrag) {
+        // Free-cursor fallback also looks without a held button, but only over the game canvas.
+        if (event.target === canvas) applyLookDelta(
+          Math.max(-MAX_POINTER_LOOK_DELTA, Math.min(MAX_POINTER_LOOK_DELTA, event.movementX)),
+          Math.max(-MAX_POINTER_LOOK_DELTA, Math.min(MAX_POINTER_LOOK_DELTA, event.movementY)),
+        )
+        return
+      }
       applyLookDelta(event.clientX - mouseDrag.x, event.clientY - mouseDrag.y)
       mouseDrag.x = event.clientX
       mouseDrag.y = event.clientY
@@ -332,8 +341,10 @@ function GameCamera({
       event.preventDefault()
       applyLookDelta(0, 0, event.deltaY)
     }
-    const onPointerLockChange = () => {
+    const onPointerLockChange = (event?: Event) => {
       const locked = document.pointerLockElement === canvas
+      acquiringPointerLock = false
+      pointerLockedAt = locked && event ? event.timeStamp : -Infinity
       canvas.dataset.pointerLocked = String(locked)
       pointerLookCalibrated = !locked
       if (!locked) clearMouseInput()
@@ -347,11 +358,12 @@ function GameCamera({
       if (active) event.preventDefault()
     }
     const onCameraReset = (event: KeyboardEvent) => {
-      if (!active || controls.blocked.current || event.code !== 'KeyC' || document.pointerLockElement !== canvas) return
+      if (!active || controls.blocked.current || event.code !== 'KeyC') return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return
       orbit.current.yaw = DEFAULT_CAMERA_ORBIT.yaw
       orbit.current.pitch = DEFAULT_CAMERA_ORBIT.pitch
-      pointerLookCalibrated = false
-      cameraResetPendingGrab = true
+      // C resets view, not pointer lock: the very next intentional delta must remain responsive.
+      pointerLookCalibrated = true
       canvas.dataset.cameraReset = String(Number(canvas.dataset.cameraReset ?? '0') + 1)
       canvas.dataset.cameraYaw = orbit.current.yaw.toFixed(6)
       canvas.dataset.cameraPitch = orbit.current.pitch.toFixed(6)
@@ -458,6 +470,7 @@ function PlayerRunner({
   onEscape: () => void
 }) {
   const groundContacts = useRef<Set<number>>(new Set())
+  const jumpBuffer = useRef(new JumpBuffer())
   const footSensor = useRef<RapierCollider>(null)
   const { world } = useRapier()
   const canvas = useThree((state) => state.gl.domElement)
@@ -479,6 +492,7 @@ function PlayerRunner({
     positionRef.current.set(SPAWN.x, SPAWN.y, SPAWN.z)
     deathCooldown.current = false
     groundContacts.current.clear()
+    jumpBuffer.current.clear()
     rocketUntil.current = 0
     springArmed.current = false
     lavaGraceUntil.current = 0
@@ -515,9 +529,12 @@ function PlayerRunner({
     if (position) {
       positionRef.current.set(position.x, position.y, position.z)
       canvas.dataset.localY = position.y.toFixed(3)
+      canvas.dataset.localX = position.x.toFixed(3)
+      canvas.dataset.localZ = position.z.toFixed(3)
       canvas.dataset.localPositionSample = String(++positionSample.current)
     }
     if (!active || !position) {
+      jumpBuffer.current.clear()
       visual.velocityX = 0
       visual.velocityY = 0
       visual.velocityZ = 0
@@ -529,18 +546,12 @@ function PlayerRunner({
     visual.velocityX = linearVelocity.x
     visual.velocityY = linearVelocity.y
     visual.velocityZ = linearVelocity.z
-    visual.grounded = groundContacts.current.size > 0
-
     const sensor = footSensor.current
-    if (sensor) {
-      for (const handle of groundContacts.current) {
-        const collider = world.getCollider(handle)
-        if (!collider || !world.intersectionPair(sensor, collider)) groundContacts.current.delete(handle)
-      }
-    }
-
-    canvas.dataset.localGrounded = String(groundContacts.current.size > 0)
-    const grounded = groundContacts.current.size > 0
+    if (sensor) refreshFootContacts(world, sensor, groundContacts.current)
+    // The foot sensor can still overlap just after takeoff; that is not a second launch surface.
+    const grounded = linearVelocity.y <= 0.1 && groundContacts.current.size > 0
+    visual.grounded = grounded
+    canvas.dataset.localGrounded = String(grounded)
     if (grounded && !previouslyGrounded.current) controls.audio.current?.play('land')
     previouslyGrounded.current = grounded
 
@@ -586,18 +597,19 @@ function PlayerRunner({
     runner.setLinvel({ x: velocity.x, y: linearVelocity.y, z: velocity.z }, true)
 
     if (controls.jumpQueued.current) {
-      if (groundContacts.current.size > 0) {
-        const jumpMultiplier = springArmed.current ? abilitySpec('spring-shoes').jumpMultiplier : 1
-        runner.setLinvel({ x: velocity.x, y: JUMP_SPEED * jumpMultiplier, z: velocity.z }, true)
-        canvas.dataset.localJumpAck = String(Number(canvas.dataset.localJumpAck ?? '0') + 1)
-        controls.audio.current?.play('jump')
-        if (springArmed.current) {
-          springArmed.current = false
-          onFeedback('스프링 점프!')
-        }
-        groundContacts.current.clear()
-      }
+      jumpBuffer.current.queue(clock.elapsedTime)
       controls.jumpQueued.current = false
+    }
+    if (jumpBuffer.current.consume(clock.elapsedTime, grounded)) {
+      const jumpMultiplier = springArmed.current ? abilitySpec('spring-shoes').jumpMultiplier : 1
+      runner.setLinvel({ x: velocity.x, y: JUMP_SPEED * jumpMultiplier, z: velocity.z }, true)
+      canvas.dataset.localJumpAck = String(Number(canvas.dataset.localJumpAck ?? '0') + 1)
+      controls.audio.current?.play('jump')
+      if (springArmed.current) {
+        springArmed.current = false
+        onFeedback('스프링 점프!')
+      }
+      groundContacts.current.clear()
     }
   })
 
@@ -1186,6 +1198,7 @@ function SceneHealth({
 
   useEffect(() => {
     const canvas = renderer.domElement
+    canvas.dataset.sceneReady = 'false'
     const context = renderer.getContext()
     const pixel = new Uint8Array(4)
     let observedFrames = 0
@@ -1239,6 +1252,7 @@ function SceneHealth({
 
       if (frameHasVisibleScene(samples)) {
         readyReported = true
+        canvas.dataset.sceneReady = 'true'
         readyCallback.current()
       } else if (observedFrames >= 120) {
         fail('3D 장면이 검은 화면으로 감지됐습니다.')
@@ -1289,6 +1303,7 @@ function NetworkGameScene({
   rescueLinks,
   sendInput,
   onPose,
+  warming,
   onReady,
   onFailure,
 }: {
@@ -1304,11 +1319,13 @@ function NetworkGameScene({
     pose: PlayerCharacterPresentationState | null,
     rescueLinkId: string,
   ) => void
+  warming: boolean
   onReady: () => void
   onFailure: (message: string) => void
 }) {
   return (
     <Canvas
+      frameloop={warming || players.length > 0 ? 'always' : 'demand'}
       camera={{ position: [7, 3, 8], fov: 48 }}
       dpr={[1, 1.5]}
       gl={{ antialias: false, powerPreference: 'high-performance' }}
@@ -1791,7 +1808,7 @@ export default function HellbreakGame() {
           <li><kbd>SHIFT</kbd> 달리기</li>
           {gameMode === 'local' && <li><kbd>F</kbd> 획득한 능력 사용</li>}
           {gameMode === 'online' && <li><kbd>E</kbd> 길게 눌러 추락한 팀원 구조</li>}
-          <li><kbd>DRAG</kbd> 시점 회전 · 휠 거리 조절</li>
+          <li><kbd>마우스</kbd> 시점 회전 · 휠 거리 조절</li>
           {gameMode === 'local' && <li><kbd>Q / E</kbd> 사망 후 관전 대상 변경</li>}
         </ul>
       </section>
@@ -1807,7 +1824,7 @@ export default function HellbreakGame() {
               heldAbility={heldAbility}
               resetToken={resetToken}
               controls={controls}
-              paused={settingsOpen}
+              paused={localPhysicsPaused(started, sceneReady, settingsOpen)}
               spectating={spectating}
               spectatorIndex={spectatorIndex}
               onPickupAbility={(ability) => {
@@ -1830,7 +1847,7 @@ export default function HellbreakGame() {
             />
           </SceneErrorBoundary>
         )}
-        {!sceneError && onlineConnected && (
+        {!sceneError && gameMode === 'online' && (
           <SceneErrorBoundary onError={handleSceneFailure}>
             <NetworkGameScene
               players={network.players}
@@ -1838,6 +1855,7 @@ export default function HellbreakGame() {
               ownPlayerId={network.ownPlayerId}
               controls={controls}
               active={sceneReady && onlineHud.canMove}
+              warming={!sceneReady}
               rescueLinks={rescue.links}
               sendInput={network.sendInput}
               onPose={handleOnlineCharacterPose}
@@ -1915,9 +1933,7 @@ export default function HellbreakGame() {
               </button>
             </div>
             <div className="aim-reticle" aria-hidden="true" data-testid="aim-reticle" />
-            <div className="camera-hint">{gameMode === 'online'
-              ? '마우스: 시야 · 좌클릭 유지: 잡기 · Space: 점프 / 매달림 점프 · W: 턱 올라가기 · C: 정면 조준 · Esc: 설정'
-              : '마우스: 시야 · WASD: 이동 · Space: 점프 · F: 능력 · Esc: 설정'}</div>
+            {settings.showGuide && <ControlGuide online={onlineConnected} />}
           </>
         )}
         {gameMode === 'local' && spectating && !finished && (

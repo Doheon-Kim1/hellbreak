@@ -1,6 +1,9 @@
 import { PLAYGROUND_ROUTE, playgroundPlatformPose } from './playground'
 import type { PlaygroundPlatform } from './playground'
 
+/** A fresh jump just before landing survives briefly; held input never refreshes this window. */
+export const JUMP_BUFFER_SECONDS = 0.15
+
 export interface MovementInput {
   forward?: boolean
   backward?: boolean

@@ -5,11 +5,12 @@ export interface GameSettings {
   effectsVolume: number
   ambientVolume: number
   muted: boolean
+  showGuide: boolean
 }
 export const GAME_SETTINGS_KEY = 'hellbreak.settings.v1'
 export const DEFAULT_GAME_SETTINGS: Readonly<GameSettings> = {
   sensitivity: 1, invertY: false, masterVolume: 0.65,
-  effectsVolume: 0.8, ambientVolume: 0.3, muted: false,
+  effectsVolume: 0.8, ambientVolume: 0.3, muted: false, showGuide: true,
 }
 export function normalizeGameSettings(value: unknown): GameSettings {
   const input = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
@@ -25,6 +26,7 @@ export function normalizeGameSettings(value: unknown): GameSettings {
     effectsVolume: bounded('effectsVolume', 0, 1),
     ambientVolume: bounded('ambientVolume', 0, 1),
     muted: typeof input.muted === 'boolean' ? input.muted : false,
+    showGuide: typeof input.showGuide === 'boolean' ? input.showGuide : true,
   }
 }
 export function loadGameSettings(storage: Pick<Storage, 'getItem'>): GameSettings {

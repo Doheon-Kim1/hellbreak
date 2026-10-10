@@ -19,7 +19,8 @@ export interface CameraOffset {
 }
 
 export const DEFAULT_CAMERA_ORBIT: Readonly<CameraOrbit> = {
-  yaw: 0.7298996581517315,
+  // Face the first climb, rather than an unrelated diagonal of the playground.
+  yaw: -Math.PI / 4,
   pitch: 0,
   distance: 10.765802338887706,
 }
@@ -27,6 +28,7 @@ export const DEFAULT_CAMERA_ORBIT: Readonly<CameraOrbit> = {
 export const MIN_CAMERA_PITCH = -Math.PI * (65 / 180)
 export const MAX_CAMERA_PITCH = Math.PI * (70 / 180)
 export const MAX_POINTER_LOOK_DELTA = 100
+export const POINTER_LOCK_SETTLE_MS = 100
 
 export async function requestPointerLockSafely(
   request: () => void | Promise<void>,
@@ -42,9 +44,9 @@ export async function requestPointerLockSafely(
 }
 
 /** Reject the oversized cursor-warp event some browsers emit while acquiring pointer lock. */
-export function isUsableInitialPointerLookDelta(deltaX: number, deltaY: number): boolean {
+export function isUsableInitialPointerLookDelta(deltaX: number, deltaY: number, elapsedSinceLockMs = Infinity): boolean {
   const magnitude = Math.max(Math.abs(deltaX), Math.abs(deltaY))
-  return Number.isFinite(deltaX)
+  return elapsedSinceLockMs >= POINTER_LOCK_SETTLE_MS && Number.isFinite(deltaX)
     && Number.isFinite(deltaY)
     && magnitude >= 0.5
     && magnitude <= MAX_POINTER_LOOK_DELTA
