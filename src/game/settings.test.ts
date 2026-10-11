@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_GAME_SETTINGS, normalizeGameSettings, loadGameSettings, saveGameSettings, GAME_SETTINGS_KEY } from './settings'
 
 describe('browser game preferences', () => {
+  it('migrates old saves to audible independent BGM and persists a silent music preference', () => {
+    const old = { ...DEFAULT_GAME_SETTINGS } as Record<string, unknown>
+    delete old.musicVolume
+    expect(normalizeGameSettings(old).musicVolume).toBeGreaterThan(0)
+    expect(normalizeGameSettings({ musicVolume: 9 }).musicVolume).toBe(1)
+    expect(normalizeGameSettings({ musicVolume: -2 }).musicVolume).toBe(0)
+    expect(normalizeGameSettings({ musicVolume: 'loud' }).musicVolume).toBe(DEFAULT_GAME_SETTINGS.musicVolume)
+    const values = new Map<string, string>()
+    const storage = { getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) } }
+    saveGameSettings(storage, { ...DEFAULT_GAME_SETTINGS, musicVolume: 0 })
+    expect(loadGameSettings(storage).musicVolume).toBe(0)
+    expect(loadGameSettings(storage).effectsVolume).toBe(DEFAULT_GAME_SETTINGS.effectsVolume)
+  })
   it('shows the key guide by default and persists an explicit off preference', () => {
     expect(normalizeGameSettings({}).showGuide).toBe(true)
     expect(normalizeGameSettings({ showGuide: false }).showGuide).toBe(false)

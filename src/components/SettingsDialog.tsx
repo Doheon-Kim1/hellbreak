@@ -13,7 +13,7 @@ export function SettingsDialog({ open, settings, online, saved, onChange, onClos
     if (open) dialog.current?.showModal()
     else dialog.current?.close()
   }, [open])
-  const slider = (key: 'sensitivity' | 'masterVolume' | 'effectsVolume' | 'ambientVolume', label: string) => (
+  const slider = (key: 'sensitivity' | 'masterVolume' | 'effectsVolume' | 'ambientVolume' | 'musicVolume', label: string) => (
     <label className="settings-slider">
       <span>{label}<output>{key === 'sensitivity' ? `${settings[key].toFixed(2)}×` : `${Math.round(settings[key] * 100)}%`}</output></span>
       <input type="range" aria-label={label} min={key === 'sensitivity' ? 0.2 : 0}
@@ -38,6 +38,7 @@ export function SettingsDialog({ open, settings, online, saved, onChange, onClos
       </fieldset>
       <fieldset><legend>게임 사운드</legend>
         {slider('masterVolume', '전체 볼륨')}{slider('effectsVolume', '효과음 볼륨')}{slider('ambientVolume', '용암 배경음 볼륨')}
+        {slider('musicVolume', '용암 BGM 볼륨')}
         <label className="settings-check"><input type="checkbox" checked={settings.muted}
           onChange={(event) => onChange({ ...settings, muted: event.target.checked })} />전체 음소거</label>
         {onTestSound && <button type="button" onClick={onTestSound}>효과음 미리 듣기</button>}

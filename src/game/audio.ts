@@ -1,11 +1,13 @@
 import { normalizeGameSettings } from './settings'
 import type { GameSettings } from './settings'
+import { synthesizeLavaMusic } from './lava-music'
 export type SoundCue = 'jump' | 'land' | 'grab' | 'death' | 'win' | 'warning' | 'start'
 export interface SoundNote { frequency: number; duration: number; gain: number; endFrequency: number }
 export function audioLevels(settings: Readonly<GameSettings>, playing: boolean) {
   const s = normalizeGameSettings(settings)
   const master = s.muted ? 0 : s.masterVolume
-  return { effects: master * s.effectsVolume, ambient: playing ? master * s.ambientVolume : 0 }
+  return { effects: master * s.effectsVolume, ambient: playing ? master * s.ambientVolume : 0,
+    music: playing ? master * s.musicVolume : 0 }
 }
 export function soundSequence(cue: SoundCue): readonly SoundNote[] {
   const note = (frequency: number, endFrequency: number, duration: number, gain = 0.15): SoundNote =>
@@ -33,10 +35,13 @@ export interface GameAudio {
 export function createGameAudio(context: AudioContext): GameAudio {
   const effects = context.createGain()
   const ambient = context.createGain()
+  const music = context.createGain()
   effects.gain.value = 0
   ambient.gain.value = 0
+  music.gain.value = 0
   effects.connect(context.destination)
   ambient.connect(context.destination)
+  music.connect(context.destination)
   const noise = context.createBufferSource()
   const buffer = context.createBuffer(1, context.sampleRate * 2, context.sampleRate)
   const data = buffer.getChannelData(0)
@@ -53,6 +58,15 @@ export function createGameAudio(context: AudioContext): GameAudio {
   noise.connect(filter)
   filter.connect(ambient)
   noise.start()
+  const score = synthesizeLavaMusic(22050)
+  const musicBuffer = context.createBuffer(2, score.channels[0].length, score.sampleRate)
+  musicBuffer.getChannelData(0).set(score.channels[0])
+  musicBuffer.getChannelData(1).set(score.channels[1])
+  const musicSource = context.createBufferSource()
+  musicSource.buffer = musicBuffer
+  musicSource.loop = true
+  musicSource.connect(music)
+  musicSource.start()
   let disposed = false
   let suspended = false
   const voices = new Map<OscillatorNode, GainNode>()
@@ -67,6 +81,7 @@ export function createGameAudio(context: AudioContext): GameAudio {
       const levels = audioLevels(settings, playing)
       ramp(effects.gain, levels.effects)
       ramp(ambient.gain, levels.ambient)
+      ramp(music.gain, levels.music)
     },
     unlock() {
       if (disposed) return
@@ -105,10 +120,13 @@ export function createGameAudio(context: AudioContext): GameAudio {
       noise.stop()
       noise.disconnect()
       filter.disconnect()
+      musicSource.stop()
+      musicSource.disconnect()
       for (const [voice, envelope] of voices) { voice.stop(); voice.disconnect(); envelope.disconnect() }
       voices.clear()
       effects.disconnect()
       ambient.disconnect()
+      music.disconnect()
       void context.close().catch(() => undefined)
     },
   }

@@ -92,7 +92,7 @@ test('real audio graph emits sound and mutes its output', async ({ page }) => {
   await page.getByRole('button', { name: '설정 닫기' }).click()
   await page.waitForTimeout(700)
   expect(await page.evaluate(() => (window as unknown as { audioEvidence: { peak: number } }).audioEvidence.peak)).toBe(0)
-  expect(await page.evaluate(() => (window as unknown as { audioEvidence: { channels: number[] } }).audioEvidence.channels)).toEqual([0, 0])
+  expect(await page.evaluate(() => (window as unknown as { audioEvidence: { channels: number[] } }).audioEvidence.channels)).toEqual([0, 0, 0])
   expect(errors).toEqual([])
 })
 
