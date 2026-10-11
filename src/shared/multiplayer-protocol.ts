@@ -40,6 +40,8 @@ export interface MultiplayerInputCommand {
   grab: boolean
   cameraYaw: number
   cameraPitch: number
+  /** Bounded horizontal view boom only; no client camera coordinates or target IDs. */
+  cameraDistance?: number
 }
 
 export interface NetworkPlayerSnapshot {

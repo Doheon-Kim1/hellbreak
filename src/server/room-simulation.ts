@@ -1,16 +1,16 @@
-import { MAX_CAMERA_PITCH, MIN_CAMERA_PITCH, rotateMovementByCamera } from '../game/camera'
+import { MAX_CAMERA_PITCH, MIN_CAMERA_PITCH, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE,
+  cameraAimOrigin, rotateMovementByCamera } from '../game/camera'
 import { JUMP_BUFFER_SECONDS, movementVelocity } from '../game/movement'
-import { gripAnchorById, playgroundGripAnchors } from '../game/grip-anchors'
-import type { GripAnchor } from '../game/grip-anchors'
+import { gripAnchorById, playgroundGripAnchors, segmentHitsPlatformBeforeAnchor, type GripAnchor } from '../game/grip-anchors'
 import { lavaStateAt } from '../game/match'
 import type { LavaPhase, MatchPhase, MatchWinner } from '../game/match'
 import {
   PLAYGROUND_HALF_EXTENT,
-  PLAYGROUND_PLATFORM_THICKNESS,
+
   coversPoint,
   finalPlatformSurface,
   platformSurface,
-  playgroundSurfaces,
+
   supportTopBelow,
 } from '../game/playground'
 import { RESCUE_BALANCE, rescueConeCos } from './rescue-balance'
@@ -27,6 +27,7 @@ export interface PlayerInputCommand {
   grab?: boolean
   cameraYaw?: number
   cameraPitch?: number
+  cameraDistance?: number
 }
 
 export interface RoomPlayerState {
@@ -329,6 +330,7 @@ export function applyPlayerInput(
     || controls.some((value) => value !== undefined && typeof value !== 'boolean')
     || (input.cameraYaw !== undefined && !Number.isFinite(input.cameraYaw))
     || (input.cameraPitch !== undefined && !Number.isFinite(input.cameraPitch))
+    || (input.cameraDistance !== undefined && !Number.isFinite(input.cameraDistance))
   ) return room
 
   const command: PlayerInputCommand = {
@@ -342,6 +344,9 @@ export function applyPlayerInput(
     grab: input.grab ?? false,
     cameraYaw: normalizeYaw(input.cameraYaw ?? 0),
     cameraPitch: clampCameraPitch(input.cameraPitch ?? 0),
+    ...(input.cameraDistance === undefined ? {} : {
+      cameraDistance: Math.min(MAX_CAMERA_DISTANCE, Math.max(MIN_CAMERA_DISTANCE, input.cameraDistance)),
+    }),
   }
 
   // Only a false→true transition arms a jump, so a held button cannot buffer repeated takeoffs.
@@ -650,62 +655,15 @@ function commitRescueLinks(
   }))
 }
 
-function segmentHitsPlatformBeforeAnchor(
-  fromX: number,
-  fromY: number,
-  fromZ: number,
-  toX: number,
-  toY: number,
-  toZ: number,
-): boolean {
-  const dx = toX - fromX
-  const dy = toY - fromY
-  const dz = toZ - fromZ
-  const epsilon = 1e-7
-
-  for (const surface of playgroundSurfaces()) {
-    let near = 0
-    let far = 1
-    const minY = surface.top - PLAYGROUND_PLATFORM_THICKNESS
-
-    if (Math.abs(dx) < epsilon) {
-      if (fromX < surface.minX || fromX > surface.maxX) continue
-    } else {
-      const first = (surface.minX - fromX) / dx
-      const second = (surface.maxX - fromX) / dx
-      near = Math.max(near, Math.min(first, second))
-      far = Math.min(far, Math.max(first, second))
-      if (near > far) continue
-    }
-    if (Math.abs(dy) < epsilon) {
-      if (fromY < minY || fromY > surface.top) continue
-    } else {
-      const first = (minY - fromY) / dy
-      const second = (surface.top - fromY) / dy
-      near = Math.max(near, Math.min(first, second))
-      far = Math.min(far, Math.max(first, second))
-      if (near > far) continue
-    }
-    if (Math.abs(dz) < epsilon) {
-      if (fromZ < surface.minZ || fromZ > surface.maxZ) continue
-    } else {
-      const first = (surface.minZ - fromZ) / dz
-      const second = (surface.maxZ - fromZ) / dz
-      near = Math.max(near, Math.min(first, second))
-      far = Math.min(far, Math.max(first, second))
-      if (near > far) continue
-    }
-
-    if (far > epsilon && near < 1 - epsilon) return true
-  }
-  return false
-}
-
 function structureAimDot(player: RoomPlayerState, anchor: GripAnchor): number {
-  const originY = player.y + 0.25
-  const dx = anchor.x - player.x
-  const dy = anchor.y - originY
-  const dz = anchor.z - player.z
+  const origin = { x: player.x, y: player.y + 0.25, z: player.z }
+  if (player.input.cameraDistance !== undefined) cameraAimOrigin(player, {
+    yaw: player.input.cameraYaw ?? 0, pitch: player.input.cameraPitch ?? 0,
+    distance: player.input.cameraDistance,
+  }, origin)
+  const dx = anchor.x - origin.x
+  const dy = anchor.y - origin.y
+  const dz = anchor.z - origin.z
   const distance = Math.hypot(dx, dy, dz)
   if (distance < 1e-6) return 1
   const yaw = player.input.cameraYaw ?? 0
@@ -723,7 +681,11 @@ function structureGripDistance(player: RoomPlayerState, anchor: GripAnchor): num
 
 function structureCandidate(player: RoomPlayerState, anchor: GripAnchor): boolean {
   const facingSide = (player.x - anchor.x) * anchor.normalX + (player.z - anchor.z) * anchor.normalZ
-  return structureGripDistance(player, anchor) <= STRUCTURE_GRIP.reach
+  // A rear-view boom can see past the body: it must not catch the wall behind the player's gaze.
+  const viewIntoFace = -Math.sin(player.input.cameraYaw ?? 0) * anchor.normalX
+    - Math.cos(player.input.cameraYaw ?? 0) * anchor.normalZ
+  return (player.input.cameraDistance === undefined || viewIntoFace < -0.05)
+    && structureGripDistance(player, anchor) <= STRUCTURE_GRIP.reach
     && structureAimDot(player, anchor) >= STRUCTURE_GRIP_CONE_COS
     && facingSide >= -0.05
     && !segmentHitsPlatformBeforeAnchor(

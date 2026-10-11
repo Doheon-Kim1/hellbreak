@@ -1,4 +1,4 @@
-import { playgroundSurfaces } from './playground'
+import { playgroundSurfaces, PLAYGROUND_PLATFORM_THICKNESS } from './playground'
 
 export interface GripAnchor {
   readonly id: string
@@ -74,4 +74,55 @@ export function playgroundGripAnchors(): readonly GripAnchor[] {
 
 export function gripAnchorById(id: string): GripAnchor | null {
   return ANCHOR_BY_ID.get(id) ?? null
+}
+
+export function segmentHitsPlatformBeforeAnchor(
+  fromX: number,
+  fromY: number,
+  fromZ: number,
+  toX: number,
+  toY: number,
+  toZ: number,
+): boolean {
+  const dx = toX - fromX
+  const dy = toY - fromY
+  const dz = toZ - fromZ
+  const epsilon = 1e-7
+
+  for (const surface of playgroundSurfaces()) {
+    let near = 0
+    let far = 1
+    const minY = surface.top - PLAYGROUND_PLATFORM_THICKNESS
+
+    if (Math.abs(dx) < epsilon) {
+      if (fromX < surface.minX || fromX > surface.maxX) continue
+    } else {
+      const first = (surface.minX - fromX) / dx
+      const second = (surface.maxX - fromX) / dx
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+    if (Math.abs(dy) < epsilon) {
+      if (fromY < minY || fromY > surface.top) continue
+    } else {
+      const first = (minY - fromY) / dy
+      const second = (surface.top - fromY) / dy
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+    if (Math.abs(dz) < epsilon) {
+      if (fromZ < surface.minZ || fromZ > surface.maxZ) continue
+    } else {
+      const first = (surface.minZ - fromZ) / dz
+      const second = (surface.maxZ - fromZ) / dz
+      near = Math.max(near, Math.min(first, second))
+      far = Math.min(far, Math.max(first, second))
+      if (near > far) continue
+    }
+
+    if (far > epsilon && near < 1 - epsilon) return true
+  }
+  return false
 }

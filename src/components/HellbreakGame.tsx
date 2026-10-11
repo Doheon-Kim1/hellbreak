@@ -3,7 +3,7 @@
 import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber'
 import { CapsuleCollider, CuboidCollider, Physics, RigidBody, useRapier } from '@react-three/rapier'
 import type { IntersectionEnterPayload, IntersectionExitPayload, RapierCollider, RapierRigidBody } from '@react-three/rapier'
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import { Matrix4, Quaternion, Vector3 } from 'three'
 import type { Group, Mesh, MeshStandardMaterial, PlaneGeometry } from 'three'
@@ -11,7 +11,7 @@ import {
   DEFAULT_CAMERA_ORBIT,
   MAX_POINTER_LOOK_DELTA,
   cameraAimDirection,
-  cameraOrbitOffset,
+  cameraAimOrigin,
   isUsableInitialPointerLookDelta,
   requestPointerLockSafely,
   rotateMovementByCamera,
@@ -36,9 +36,10 @@ import {
 } from '../game/rescue-rope-visuals'
 import { frameHasVisibleScene, localPhysicsPaused, playerPresentation, sceneCoverVisible } from '../game/player-lifecycle'
 import type { FramePixelSample } from '../game/player-lifecycle'
+import { createRenderBudget, sampleRenderBudget } from '../game/render-budget'
 import { PLAYGROUND_PLATFORM_THICKNESS } from '../game/playground'
 import { gripAnchorById } from '../game/grip-anchors'
-import { interpolateNetworkPosition } from '../network/interpolation'
+import { NETWORK_SNAP_DISTANCE, interpolateNetworkPosition } from '../network/interpolation'
 import { roomPhaseLabel } from '../network/room-connection'
 import { useHellbreakRoom } from '../network/use-hellbreak-room'
 import { useMultiplayerModes } from '../network/use-multiplayer-modes'
@@ -54,6 +55,7 @@ import { SettingsDialog } from './SettingsDialog'
 import { ControlGuide } from './ControlGuide'
 import { refreshFootContacts } from '../game/local-grounding'
 import { JumpBuffer } from '../game/jump-buffer'
+import { emptyLocalGrip, stepLocalGrip } from '../game/local-grip'
 import { DEFAULT_GAME_SETTINGS, loadGameSettings, saveGameSettings } from '../game/settings'
 import type { GameSettings } from '../game/settings'
 import { useGameAudio } from '../game/use-game-audio'
@@ -188,7 +190,7 @@ function useReducedMotion() {
   return reduced
 }
 
-function GameCamera({
+export function GameCamera({
   playerPosition,
   orbit,
   controls,
@@ -421,9 +423,9 @@ function GameCamera({
 
     const position = mode === 'network' ? networkTarget?.current : playerPosition?.current
     if (!position) return
-    const offset = cameraOrbitOffset(orbit.current)
-    desired.set(position.x + offset.x, position.y + 1.05, position.z + offset.z)
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 7.2))
+    cameraAimOrigin(position, orbit.current, desired)
+    // Lagging the boom while rotating the ray breaks screen-centred server grip aim.
+    camera.position.copy(desired)
     cameraAimDirection(orbit.current, aimDirection)
     lookAt.copy(camera.position).addScaledVector(aimDirection, 20)
     camera.lookAt(lookAt)
@@ -432,7 +434,7 @@ function GameCamera({
   return null
 }
 
-function PlayerRunner({
+export function PlayerRunner({
   body,
   positionRef,
   active,
@@ -471,6 +473,7 @@ function PlayerRunner({
 }) {
   const groundContacts = useRef<Set<number>>(new Set())
   const jumpBuffer = useRef(new JumpBuffer())
+  const localGrip = useRef(emptyLocalGrip())
   const footSensor = useRef<RapierCollider>(null)
   const { world } = useRapier()
   const canvas = useThree((state) => state.gl.domElement)
@@ -487,20 +490,23 @@ function PlayerRunner({
   useRunnerControls(controls)
 
   useEffect(() => {
-    body.current?.setTranslation(SPAWN, true)
-    body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    const runner = body.current
+    if (!renderBody || !runner?.isValid()) return
+    runner.setTranslation(SPAWN, true)
+    runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
     positionRef.current.set(SPAWN.x, SPAWN.y, SPAWN.z)
     deathCooldown.current = false
     groundContacts.current.clear()
     jumpBuffer.current.clear()
     rocketUntil.current = 0
+    localGrip.current = emptyLocalGrip()
     springArmed.current = false
     lavaGraceUntil.current = 0
-  }, [body, positionRef, resetToken])
+  }, [body, positionRef, resetToken, renderBody])
 
   useEffect(() => {
     const runner = body.current
-    if (!runner) return
+    if (!renderBody || !runner?.isValid()) return
     if (freezeBody) {
       runner.setLinvel({ x: 0, y: 0, z: 0 }, true)
       runner.setAngvel({ x: 0, y: 0, z: 0 }, true)
@@ -510,11 +516,12 @@ function PlayerRunner({
       runner.setGravityScale(1, true)
       runner.wakeUp()
     }
-  }, [body, freezeBody])
+  }, [body, freezeBody, renderBody])
 
   useFrame(({ clock }, delta) => {
     const runner = body.current
-    if (!runner) return
+    // The frame subscription survives the RigidBody child during spectator transitions.
+    if (!renderBody || !runner || !runner.isValid()) return
 
     const visual = characterFrame.current
     visual.elapsed = clock.elapsedTime
@@ -557,6 +564,13 @@ function PlayerRunner({
 
     if (position.y < lavaHeight + 0.35 && elapsed >= lavaGraceUntil.current && !deathCooldown.current) {
       if (heldAbility === 'extinguisher') {
+        // The defensive launch takes motion ownership away from a held ledge.
+        // Preserve stamina, but prevent held grab from immediately cancelling the bounce.
+        localGrip.current = { ...localGrip.current, anchorId: '', stage: 'hold', cooldownUntil: elapsed + 0.65 }
+        runner.setGravityScale(1, true)
+        canvas.dataset.localStructureGrip = ''
+        canvas.dataset.localGripStage = ''
+        visual.rescueRole = 'none'
         lavaGraceUntil.current = elapsed + 1.5
         runner.setLinvel({ x: 0, y: JUMP_SPEED * 1.45, z: 0 }, true)
         onConsumeAbility()
@@ -588,8 +602,38 @@ function PlayerRunner({
       controls.abilityQueued.current = false
     }
 
-    // The local bot match has no rescue mechanic, so `input.rescue` is deliberately unread here.
     const input = readRunnerInput(controls.input.current)
+    const grip = stepLocalGrip(localGrip.current, position, cameraOrbit.current, {
+      grab: input.rescue, forward: input.forward, jump: controls.jumpQueued.current,
+    }, grounded, delta, elapsed)
+    localGrip.current = grip.state
+    runner.setGravityScale(grip.gravityScale, true)
+    canvas.dataset.localStructureGrip = grip.state.anchorId
+    canvas.dataset.localGrip = grip.state.grip.toFixed(3)
+    canvas.dataset.localGripStage = grip.state.anchorId ? grip.state.stage : ''
+    const anchor = gripAnchorById(grip.state.anchorId)
+    visual.rescueRole = anchor ? 'rescuer' : 'none'
+    if (anchor) {
+      visual.rescueDirectionX = anchor.x - position.x
+      visual.rescueDirectionY = anchor.y - position.y
+      visual.rescueDirectionZ = anchor.z - position.z
+    }
+    if (grip.grabbed) onFeedback('발판 턱 잡기 · W로 올라가기 · Space로 매달림 점프')
+    if (grip.completed) onFeedback('턱 올라가기 완료')
+    if (grip.velocity) {
+      const multiplier = grip.jumped && springArmed.current ? abilitySpec('spring-shoes').jumpMultiplier : 1
+      runner.setLinvel({ ...grip.velocity, y: grip.velocity.y * multiplier }, true)
+    }
+    if (grip.jumped) {
+      controls.jumpQueued.current = false
+      jumpBuffer.current.clear()
+      springArmed.current = false
+      groundContacts.current.clear()
+      canvas.dataset.localJumpAck = String(Number(canvas.dataset.localJumpAck ?? '0') + 1)
+      controls.audio.current?.play('jump')
+      return
+    }
+    if (anchor) { jumpBuffer.current.clear(); return }
     const baseSpeed = input.sprint ? SPRINT_SPEED : PLAYER_SPEED
     const speedMultiplier = elapsed < rocketUntil.current ? abilitySpec('rocket-boots').speedMultiplier : 1
     const localVelocity = movementVelocity(input, baseSpeed * speedMultiplier)
@@ -696,6 +740,7 @@ function RunnerBot({ elapsed, index, reducedMotion }: { elapsed: number; index: 
 
 function NetworkAvatar({
   player,
+  snapshotElapsed,
   isOwn,
   ownPosition,
   anchors,
@@ -703,6 +748,7 @@ function NetworkAvatar({
   onPose,
 }: {
   player: NetworkPlayerSnapshot
+  snapshotElapsed: number
   isOwn: boolean
   ownPosition: RefObject<Vector3 | null>
   anchors: PlayerCharacterAnchorRegistries
@@ -723,38 +769,70 @@ function NetworkAvatar({
     reducedMotion,
   }))
   const visual = frame.current
-  visual.grounded = player.grounded
-  visual.alive = player.alive
-  visual.escaped = player.escaped
-  visual.reducedMotion = reducedMotion
-  visual.rescueRole = player.grabTargetId || player.structureGripAnchorId
-    ? 'rescuer'
-    : player.grabbedById ? 'target' : 'none'
-
-  useEffect(() => {
+  // JSX may initialize the group, but only the frame owner moves it after mount. Applying each
+  // snapshot through position props hides movement from velocity and can chase a stale effect.
+  const initialPosition = useRef<[number, number, number]>([player.x, player.y, player.z]).current
+  const publishedMotion = useRef({
+    elapsed: snapshotElapsed,
+    position: new Vector3(player.x, player.y, player.z),
+    velocityX: 0,
+    velocityZ: 0,
+    teleported: false,
+  }).current
+  useLayoutEffect(() => {
+    // Presentation speed belongs to authoritative samples, not draws. An unchanged draw must
+    // retain walking, but a newer stationary sample must stop it immediately.
+    const sampleDelta = snapshotElapsed - publishedMotion.elapsed
+    const x = player.x - publishedMotion.position.x
+    const y = player.y - publishedMotion.position.y
+    const z = player.z - publishedMotion.position.z
+    publishedMotion.teleported = x * x + y * y + z * z > NETWORK_SNAP_DISTANCE * NETWORK_SNAP_DISTANCE
+    const moving = Number.isFinite(sampleDelta) && sampleDelta > 0
+      && !publishedMotion.teleported && player.alive && !player.escaped
+    publishedMotion.velocityX = moving ? x / sampleDelta : 0
+    publishedMotion.velocityZ = moving ? z / sampleDelta : 0
+    publishedMotion.position.set(player.x, player.y, player.z)
+    publishedMotion.elapsed = snapshotElapsed
     target.set(player.x, player.y, player.z)
-  }, [player.x, player.y, player.z, target])
+  }, [player.x, player.y, player.z, player.alive, player.escaped, snapshotElapsed, publishedMotion, target])
 
   useFrame(({ clock }, delta) => {
     const group = avatar.current
     if (!group) return
+    // useFrame's callback is published at commit. A speculative render must not write into
+    // the shared frame that the still-committed child rig will consume on its next draw.
+    visual.grounded = player.grounded
+    visual.alive = player.alive
+    visual.escaped = player.escaped
+    visual.reducedMotion = reducedMotion
+    visual.rescueRole = player.grabTargetId || player.structureGripAnchorId
+      ? 'rescuer'
+      : player.grabbedById ? 'target' : 'none'
     const oldX = group.position.x
     const oldY = group.position.y
     const oldZ = group.position.z
-    interpolateNetworkPosition(group.position, target, 1 - Math.exp(-delta * 12), smoothed)
-    group.position.copy(smoothed)
+    // The owned body and its aiming boom use the same latest received authoritative position.
+    // Only remote bodies interpolate; no client positions or target IDs are sent to the room.
+    if (isOwn) group.position.copy(target)
+    else {
+      interpolateNetworkPosition(group.position, target, 1 - Math.exp(-delta * 12), smoothed)
+      group.position.copy(smoothed)
+    }
 
     const safeDelta = Number.isFinite(delta) && delta > 0 ? delta : 1 / 60
     const deltaX = group.position.x - oldX
     const deltaY = group.position.y - oldY
     const deltaZ = group.position.z - oldZ
     // A restart/spawn snap is not a 1,000 m/s run animation; keep the last heading instead.
-    const teleported = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ > 16
+    const teleported = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+      > NETWORK_SNAP_DISTANCE * NETWORK_SNAP_DISTANCE
     visual.elapsed = clock.elapsedTime
     visual.delta = safeDelta
-    visual.velocityX = teleported ? 0 : deltaX / safeDelta
-    visual.velocityY = teleported ? 0 : deltaY / safeDelta
-    visual.velocityZ = teleported ? 0 : deltaZ / safeDelta
+    visual.velocityX = isOwn ? publishedMotion.velocityX : teleported ? 0 : deltaX / safeDelta
+    visual.velocityY = isOwn
+      ? publishedMotion.teleported || !player.alive || player.escaped ? 0 : player.velocityY
+      : teleported ? 0 : deltaY / safeDelta
+    visual.velocityZ = isOwn ? publishedMotion.velocityZ : teleported ? 0 : deltaZ / safeDelta
 
     const partnerId = player.grabTargetId || player.grabbedById
     const partner = partnerId ? anchors.root.get(partnerId) : undefined
@@ -777,10 +855,10 @@ function NetworkAvatar({
       visual.rescueDirectionZ = -1
     }
     if (isOwn) ownPosition.current = group.position
-  })
+  }, -1) // Before GameCamera and the child rig, without taking over automatic rendering.
 
   return (
-    <group ref={avatar} position={[player.x, player.y, player.z]}>
+    <group ref={avatar} position={initialPosition}>
       <PlayerCharacter
         playerId={player.id}
         isOwn={isOwn}
@@ -971,6 +1049,7 @@ function NetworkTower({
         grab: rescue,
         cameraYaw: cameraOrbit.current.yaw,
         cameraPitch: cameraOrbit.current.pitch,
+        cameraDistance: cameraOrbit.current.distance,
       })
     }, 50)
     return () => {
@@ -997,6 +1076,7 @@ function NetworkTower({
         <NetworkAvatar
           key={player.id}
           player={player}
+          snapshotElapsed={match.elapsed}
           isOwn={player.id === ownPlayerId}
           ownPosition={ownPosition}
           anchors={characterAnchors}
@@ -1183,18 +1263,22 @@ class SceneErrorBoundary extends Component<
   }
 }
 
-function SceneHealth({
+export function SceneHealth({
   onReady,
   onFailure,
+  onDprChange,
 }: {
   onReady: () => void
   onFailure: (message: string) => void
+  onDprChange?: (dpr: number) => void
 }) {
   const renderer = useThree((state) => state.gl)
   const readyCallback = useRef(onReady)
   const failureCallback = useRef(onFailure)
+  const dprCallback = useRef(onDprChange)
   readyCallback.current = onReady
   failureCallback.current = onFailure
+  dprCallback.current = onDprChange
 
   useEffect(() => {
     const canvas = renderer.domElement
@@ -1204,6 +1288,10 @@ function SceneHealth({
     let observedFrames = 0
     let readyReported = false
     let failed = false
+    let renderBudget = createRenderBudget(renderer.getPixelRatio())
+    const resetRenderClock = () => {
+      renderBudget = { ...renderBudget, lastTimestamp: null, slowFrames: 0, fastFrames: 0 }
+    }
 
     const fail = (message: string) => {
       if (failed) return
@@ -1216,9 +1304,19 @@ function SceneHealth({
     }
 
     canvas.addEventListener('webglcontextlost', handleContextLost)
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', resetRenderClock)
     // R3F runs after-effects after renderer.render(), so sparse readback verifies visible output rather than mere component mount.
     const unsubscribe = addAfterEffect(() => {
-      if (failed || readyReported) return
+      if (failed) return
+      // This number belongs to this WebGLRenderer.render(), not the browser RAF
+      // or global after-effect loop; a frozen scene cannot keep advancing it.
+      canvas.dataset.sceneRenderFrame = String(renderer.info.render.frame)
+      canvas.dataset.sceneRenderDpr = String(renderer.getPixelRatio())
+      const nextBudget = sampleRenderBudget(renderBudget, renderer.info.render.frame, performance.now(),
+        typeof document === 'undefined' || document.visibilityState === 'visible')
+      if (nextBudget.dpr !== renderBudget.dpr) dprCallback.current?.(nextBudget.dpr)
+      renderBudget = nextBudget
+      if (readyReported) return
       if (context.isContextLost()) {
         fail('WebGL 연결이 끊어졌습니다. 페이지를 다시 불러와 주세요.')
         return
@@ -1263,6 +1361,7 @@ function SceneHealth({
       failed = true
       unsubscribe()
       canvas.removeEventListener('webglcontextlost', handleContextLost)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', resetRenderClock)
     }
   }, [renderer])
 
@@ -1275,10 +1374,11 @@ function GameScene({
   onFailure,
   ...props
 }: Parameters<typeof Tower>[0] & { paused?: boolean; onReady: () => void; onFailure: (message: string) => void }) {
+  const [dpr, setDpr] = useState<number | [number, number]>([1, 1.5])
   return (
     <Canvas
       camera={{ position: [7, 3, 8], fov: 48 }}
-      dpr={[1, 1.5]}
+      dpr={dpr}
       gl={{ antialias: false, powerPreference: 'high-performance' }}
     >
       <color attach="background" args={['#09060d']} />
@@ -1287,7 +1387,7 @@ function GameScene({
       <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
       <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
       <Physics gravity={[0, -18, 0]} paused={paused}>
-        <SceneHealth onReady={onReady} onFailure={onFailure} />
+        <SceneHealth onReady={onReady} onFailure={onFailure} onDprChange={setDpr} />
         <Tower {...props} />
       </Physics>
     </Canvas>
@@ -1323,11 +1423,12 @@ function NetworkGameScene({
   onReady: () => void
   onFailure: (message: string) => void
 }) {
+  const [dpr, setDpr] = useState<number | [number, number]>([1, 1.5])
   return (
     <Canvas
       frameloop={warming || players.length > 0 ? 'always' : 'demand'}
       camera={{ position: [7, 3, 8], fov: 48 }}
-      dpr={[1, 1.5]}
+      dpr={dpr}
       gl={{ antialias: false, powerPreference: 'high-performance' }}
     >
       <color attach="background" args={['#09060d']} />
@@ -1336,7 +1437,7 @@ function NetworkGameScene({
       <directionalLight position={[18, 34, 20]} intensity={2.2} color="#ffb56f" />
       <pointLight position={[0, -1, 2]} intensity={100} color="#ff2500" distance={55} />
       <Physics gravity={[0, -18, 0]}>
-        <SceneHealth onReady={onReady} onFailure={onFailure} />
+        <SceneHealth onReady={onReady} onFailure={onFailure} onDprChange={setDpr} />
         <NetworkTower
           players={players}
           match={match}
@@ -1398,14 +1499,16 @@ function RescueOverlay({ rescue, notice }: { rescue: RescueHudModel; notice: str
   )
 }
 
-function MobileControls({
+export function MobileControls({
   controls,
   heldAbility,
   rescueEnabled,
+  localGripEnabled = false,
 }: {
   controls: RunnerControls
   heldAbility: RunnerAbility | null
   rescueEnabled: boolean
+  localGripEnabled?: boolean
 }) {
   const holdProps = (control: RunnerControl) => {
     const setPointer = (event: ReactPointerEvent<HTMLButtonElement>, pressed: boolean) => {
@@ -1449,10 +1552,9 @@ function MobileControls({
           {heldAbility ? abilitySpec(heldAbility).label : '능력'}
         </button>
         <button type="button" aria-label="달리기" {...holdProps('sprint')}>달리기</button>
-        {/* The local bot match has no rescue mechanic, so the hold button is online-only. */}
-        {rescueEnabled && (
-          <button type="button" aria-label="구조 잡기" className="rescue" data-testid="mobile-rescue" {...holdProps('rescue')}>
-            구조
+        {(rescueEnabled || localGripEnabled) && (
+          <button type="button" aria-label={rescueEnabled ? '구조 잡기' : '턱 잡기'} className="rescue" data-testid="mobile-rescue" {...holdProps('rescue')}>
+            {rescueEnabled ? '구조' : '잡기'}
           </button>
         )}
         <button
@@ -1952,6 +2054,7 @@ export default function HellbreakGame() {
             controls={controls}
             heldAbility={gameMode === 'local' ? heldAbility : null}
             rescueEnabled={onlineConnected}
+            localGripEnabled={gameMode === 'local'}
           />
         )}
         {onlineConnected && sceneReady && onlineHud.canMove && (

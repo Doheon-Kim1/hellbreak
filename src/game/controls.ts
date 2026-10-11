@@ -1,6 +1,6 @@
 /**
- * `rescue` is held intent shared by the keyboard and the mobile button. Only the online room
- * consumes it; the local bot match has no rescue mechanic and ignores it entirely.
+ * `rescue` is held grab intent shared by keyboard, mouse, and mobile controls.
+ * Online it also rescues teammates; offline it only grips registered route ledges.
  */
 export type RunnerControl = 'forward' | 'backward' | 'left' | 'right' | 'sprint' | 'rescue'
 

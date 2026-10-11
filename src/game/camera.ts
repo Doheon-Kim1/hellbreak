@@ -51,8 +51,9 @@ export function isUsableInitialPointerLookDelta(deltaX: number, deltaY: number, 
     && magnitude >= 0.5
     && magnitude <= MAX_POINTER_LOOK_DELTA
 }
-const MIN_DISTANCE = 6
-const MAX_DISTANCE = 15
+export const MIN_CAMERA_DISTANCE = 6
+export const MAX_CAMERA_DISTANCE = 15
+export const CAMERA_EYE_HEIGHT = 1.05
 const MOUSE_YAW_SPEED = 0.0028
 const MOUSE_PITCH_SPEED = 0.0024
 const ZOOM_SPEED = 0.01
@@ -69,13 +70,21 @@ export function updateCameraOrbitInPlace(
   const sensitivity = Number.isFinite(settings.sensitivity) ? clamp(settings.sensitivity, 0.2, 3) : 1
   orbit.yaw -= input.deltaX * MOUSE_YAW_SPEED * sensitivity
   orbit.pitch = clamp(orbit.pitch - input.deltaY * MOUSE_PITCH_SPEED * sensitivity * (settings.invertY ? -1 : 1), MIN_CAMERA_PITCH, MAX_CAMERA_PITCH)
-  orbit.distance = clamp(orbit.distance + input.zoomDelta * ZOOM_SPEED, MIN_DISTANCE, MAX_DISTANCE)
+  orbit.distance = clamp(orbit.distance + input.zoomDelta * ZOOM_SPEED, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE)
   return orbit
 }
 
 /** Compatibility helper for callers that explicitly need an immutable result. */
 export function updateCameraOrbit(orbit: CameraOrbit, input: CameraOrbitInput): CameraOrbit {
   return updateCameraOrbitInPlace({ ...orbit }, input)
+}
+
+/** Shared desired view origin; the server reconstructs it from its own body, never client XYZ. */
+export function cameraAimOrigin<T extends CameraOffset>(position: CameraOffset, orbit: CameraOrbit, out: T): T {
+  out.x = position.x + Math.sin(orbit.yaw) * orbit.distance
+  out.y = position.y + CAMERA_EYE_HEIGHT
+  out.z = position.z + Math.cos(orbit.yaw) * orbit.distance
+  return out
 }
 
 /** Third-person boom stays horizontal; signed look pitch changes aim without burying the camera. */

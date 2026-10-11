@@ -67,6 +67,27 @@ async function watchRescueReadout(
       notice: '',
       grabAck: 0,
       last: 'nothing sampled',
+      attempt: 0,
+      beginAttempt() {
+        const own = document.querySelector('[data-testid="network-player"][data-own="true"]')
+        const peer = document.querySelector(`[data-testid="network-player"][data-player-id="${targetId}"]`)
+        // Clear historical evidence only after both schema and actual old rig IDs have cleared.
+        // Render callbacks may lag schema; that phase gap is valid, cross-retry accumulation is not.
+        if (!own || !peer || own.getAttribute('data-grab-target') || peer.getAttribute('data-grabbed-by')
+          || own.getAttribute('data-character-rescue-link') === targetId
+          || peer.getAttribute('data-character-rescue-link') === rescuerId
+          || own.getAttribute('data-alive') !== 'true' || peer.getAttribute('data-alive') !== 'true'
+          || peer.getAttribute('data-grounded') !== 'true') return false
+        probe.attempt += 1
+        probe.observed = false
+        probe.semanticFrameObserved = false
+        probe.rescuerRigObserved = false
+        probe.targetRigObserved = false
+        probe.notice = ''
+        probe.grabAck = 0
+        probe.last = 'attempt armed before input'
+        return true
+      },
     }
     ;(window as unknown as { __rescueReadout: typeof probe }).__rescueReadout = probe
     const read = () => {
@@ -508,7 +529,7 @@ test('one shared room drives server jump physics and the match HUD in both brows
   } finally { await contextA.close(); await contextB.close() }
 })
 
-test('browser rescue input creates one server-owned lifeline to a real room client', async ({ browser }) => {
+test('online pointer lock denial, free cursor, and acquisition preserve input edges', async ({ browser }) => {
   const context = await browser.newContext()
   const page = await context.newPage()
   const pageErrors: string[] = []
@@ -535,52 +556,8 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
     await expect(rescuer).toHaveAttribute('data-grounded', 'true')
     await expect(jumper).toHaveAttribute('data-grounded', 'true')
 
-    // The browser sends only held rescue. The second client sends only a normal jump edge; neither can
-    // name a rescue target or submit a pose, force, or grip value.
-    // Walk into the actual first-climb (+X/-Z) view cone using only ordinary server input.
-    const sdkStart = room.state.players.get(jumperId)!
-    const targetX = Number(await rescuer.getAttribute('data-x')) + 0.7
-    const targetZ = Number(await rescuer.getAttribute('data-z')) - 0.7
-    const walkYaw = Math.atan2(-(targetX - sdkStart.x), -(targetZ - sdkStart.z))
-    room.send('input', {
-      sequence: 1,
-      forward: true,
-      backward: false,
-      left: false,
-      right: false,
-      sprint: false,
-      jump: false,
-      grab: false,
-      cameraYaw: walkYaw,
-    })
-    await expect.poll(() => room.state.players.get(jumperId)?.x ?? -26, {
-      timeout: INPUT_OBSERVATION_MS,
-      intervals: [25],
-    }).toBeGreaterThan(targetX)
-    room.send('input', {
-      sequence: 2,
-      forward: false,
-      backward: false,
-      left: false,
-      right: false,
-      sprint: false,
-      jump: false,
-      grab: false,
-      cameraYaw: 0,
-    })
-    await expect.poll(() => room.state.players.get(jumperId)?.lastProcessedInput ?? 0, {
-      timeout: INPUT_OBSERVATION_MS,
-      intervals: [25],
-    }).toBe(2)
-    const rescueStartX = room.state.players.get(jumperId)?.x ?? -26
-    // Armed before the first hold, so no link can form unwatched.
-    await watchRescueReadout(page, {
-      rescuerId,
-      targetId: jumperId,
-      urgencies: RESCUE_URGENCY_BANDS,
-      gripBands: RESCUE_GRIP_BANDS,
-    })
     const canvas = page.locator('canvas')
+    await page.bringToFront()
     await page.evaluate(() => {
       const element = document.querySelector('canvas') as HTMLCanvasElement & {
         __nativeRequestPointerLock?: HTMLCanvasElement['requestPointerLock']
@@ -634,8 +611,91 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       transmittedGrabCountBeforeAcquisition ?? '',
     )
     await expect(canvas).toHaveAttribute('data-camera-yaw', yawBeforeAcquisition ?? '')
-    await page.mouse.down({ button: 'left' })
-    await expect(canvas).toHaveAttribute('data-grab-held', 'true')
+    expect(pageErrors).toEqual([])
+  } finally {
+    await room.leave()
+    await context.close()
+  }
+})
+
+test('browser rescue input creates one server-owned lifeline to a real room client', async ({ browser }) => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await openOnlineTab(page)
+  const room = await new Client('http://127.0.0.1:2567')
+    .create<HellbreakRoomState>(HELLBREAK_ROOM_NAME)
+
+  try {
+    await page.getByLabel('룸 ID').fill(room.roomId)
+    await page.getByRole('button', { name: '참가', exact: true }).click()
+    await expect(page.getByTestId('player-count')).toContainText('참가자 2/6')
+    await expect(page.getByTestId('network-player')).toHaveCount(2)
+    await waitForOnlineScene(page)
+
+    const rescuer = page.locator('[data-testid="network-player"][data-own="true"]')
+    const jumperId = room.sessionId
+    const rescuerId = (await rescuer.getAttribute('data-player-id')) ?? ''
+    expect(rescuerId).not.toBe('')
+    expect(jumperId).not.toBe(rescuerId)
+    const jumper = page.locator(`[data-testid="network-player"][data-player-id="${jumperId}"]`)
+    const initialGrabAck = Number(await rescuer.getAttribute('data-grab-ack'))
+    expect(initialGrabAck).toBe(0)
+    await expect(rescuer).toHaveAttribute('data-grounded', 'true')
+    await expect(jumper).toHaveAttribute('data-grounded', 'true')
+
+    // The browser sends only held rescue. The second client sends only a normal jump edge; neither can
+    // name a rescue target or submit a pose, force, or grip value.
+    // Walk into the actual first-climb (+X/-Z) view cone using only ordinary server input.
+    await expect.poll(() => room.state?.players?.size ?? 0, { timeout: INPUT_OBSERVATION_MS }).toBe(2)
+    const sdkStart = room.state.players.get(jumperId)!
+    const targetX = Number(await rescuer.getAttribute('data-x')) + 0.7
+    const targetZ = Number(await rescuer.getAttribute('data-z')) - 0.7
+    const walkYaw = Math.atan2(-(targetX - sdkStart.x), -(targetZ - sdkStart.z))
+    room.send('input', {
+      sequence: 1,
+      forward: true,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: false,
+      cameraYaw: walkYaw,
+    })
+    await expect.poll(() => room.state.players.get(jumperId)?.x ?? -26, {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [25],
+    }).toBeGreaterThan(targetX)
+    room.send('input', {
+      sequence: 2,
+      forward: false,
+      backward: false,
+      left: false,
+      right: false,
+      sprint: false,
+      jump: false,
+      grab: false,
+      cameraYaw: 0,
+    })
+    await expect.poll(() => room.state.players.get(jumperId)?.lastProcessedInput ?? 0, {
+      timeout: INPUT_OBSERVATION_MS,
+      intervals: [25],
+    }).toBe(2)
+    const rescueStartX = room.state.players.get(jumperId)?.x ?? -26
+    // Armed before the first hold, so no link can form unwatched.
+    await watchRescueReadout(page, {
+      rescuerId,
+      targetId: jumperId,
+      urgencies: RESCUE_URGENCY_BANDS,
+      gripBands: RESCUE_GRIP_BANDS,
+    })
+    const canvas = page.locator('canvas')
+    await page.bringToFront()
+    await canvas.click({ position: { x: 840, y: 420 } })
+    await page.keyboard.press('KeyC')
+    await page.keyboard.down('KeyE')
     try {
       await page.waitForTimeout(250)
       const schemaLink = { target: jumperId, incoming: rescuerId }
@@ -644,6 +704,14 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       let jumpSequence = 3
       const allObserved = () => schemaObserved && readoutObserved
       for (let attempt = 0; attempt < 4 && !allObserved(); attempt += 1) {
+        await expect.poll(() => room.state.players.get(jumperId)?.grounded ?? false, { timeout: INPUT_OBSERVATION_MS, intervals: [25] }).toBe(true)
+        expect(room.state.players.get(jumperId)?.alive).toBe(true)
+        expect(room.state.players.get(rescuerId)?.alive).toBe(true)
+        await expect.poll(() => page.evaluate(() => (
+          (window as unknown as { __rescueReadout: { beginAttempt: () => boolean } }).__rescueReadout.beginAttempt()
+        )), { timeout: INPUT_OBSERVATION_MS }).toBe(true)
+        schemaObserved = false
+        readoutObserved = false
         room.send('input', {
           sequence: jumpSequence,
           forward: false,
@@ -699,7 +767,7 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       // only after the last collection.
       const readout = await rescueReadoutProbe(page)
       readoutObserved ||= readout.observed
-      const cameraDiagnostic = await canvas.evaluate((element) => ({
+      const cameraDiagnostic = schemaObserved && readoutObserved ? null : await canvas.evaluate((element) => ({
         held: element.getAttribute('data-grab-held'),
         yaw: element.getAttribute('data-camera-yaw'),
         pitch: element.getAttribute('data-camera-pitch'),
@@ -711,7 +779,7 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       expect(readoutObserved, `no coherent rescue readout; last frame ${readout.last}`).toBe(true)
       // A notice genuinely rendered during rescue is latched before game-over unmounts that HUD.
       expect(readout.notice).toMatch(/구조 시작|구조 성공|구조 실패|그립 소진/)
-      await page.mouse.up({ button: 'left' })
+      await page.keyboard.up('KeyE')
       const acknowledgedGrab = readout.grabAck
       expect(acknowledgedGrab).toBeGreaterThan(initialGrabAck)
       await expect.poll(() => room.state.players.get(rescuerId)?.lastAcknowledgedGrab ?? 0, {
@@ -720,18 +788,31 @@ test('browser rescue input creates one server-owned lifeline to a real room clie
       // The target now starts forward-right in the corrected view cone: room-owned pull moves -X.
       expect(room.state.players.get(jumperId)?.x ?? rescueStartX).toBeLessThan(rescueStartX - 0.02)
     } finally {
-      await page.mouse.up({ button: 'left' })
+      await page.keyboard.up('KeyE')
     }
 
-    await expect(rescuer).toHaveAttribute('data-grab-target', '', { timeout: INPUT_OBSERVATION_MS })
-    await expect(jumper).toHaveAttribute('data-grabbed-by', '')
-    await expect.poll(() => room.state.players.get(rescuerId)?.grabTargetId ?? 'missing', {
-      timeout: INPUT_OBSERVATION_MS,
-    }).toBe('')
-    await expect(jumper).toHaveAttribute('data-grounded', 'true', { timeout: INPUT_OBSERVATION_MS })
+    // One live completion snapshot, not stitched slow reads. Corpse grounded flags cannot pass.
+    await expect.poll(() => page.evaluate(({ rescuerId, jumperId }) => {
+      const own = document.querySelector(`[data-testid="network-player"][data-player-id="${rescuerId}"]`)
+      const peer = document.querySelector(`[data-testid="network-player"][data-player-id="${jumperId}"]`)
+      return { target: own?.getAttribute('data-grab-target'), incoming: peer?.getAttribute('data-grabbed-by'),
+        ownAlive: own?.getAttribute('data-alive'), peerAlive: peer?.getAttribute('data-alive'),
+        grounded: peer?.getAttribute('data-grounded'), held: document.querySelector('canvas')?.getAttribute('data-grab-held') }
+    }, { rescuerId, jumperId }), { timeout: INPUT_OBSERVATION_MS }).toEqual({
+      target: '', incoming: '', ownAlive: 'true', peerAlive: 'true', grounded: 'true', held: 'false',
+    })
+    // Independently require the actual SDK pair to remain released, supported and alive afterward.
+    await expect.poll(() => {
+      const own = room.state.players.get(rescuerId)
+      const peer = room.state.players.get(jumperId)
+      return { target: own?.grabTargetId, incoming: peer?.grabbedById,
+        ownAlive: own?.alive, peerAlive: peer?.alive, grounded: peer?.grounded }
+    }, { timeout: INPUT_OBSERVATION_MS }).toEqual({
+      target: '', incoming: '', ownAlive: true, peerAlive: true, grounded: true,
+    })
     expect(pageErrors).toEqual([])
   } finally {
-    await page.mouse.up({ button: 'left' }).catch(() => undefined)
+    await page.keyboard.up('KeyE').catch(() => undefined)
     await room.leave(true).catch(() => undefined)
     await context.close()
   }

@@ -10,7 +10,7 @@ import {
   stepRoom,
 } from './room-simulation'
 import { lavaStateAt } from '../game/match'
-import { MAX_CAMERA_PITCH } from '../game/camera'
+import { DEFAULT_CAMERA_ORBIT, MAX_CAMERA_PITCH } from '../game/camera'
 import { playgroundGripAnchors } from '../game/grip-anchors'
 import { RESCUE_BALANCE, rescueHoldSeconds } from './rescue-balance'
 import type { AuthoritativeRoomState, PlayerInputCommand, RoomPlayerState } from './room-simulation'
@@ -1402,6 +1402,30 @@ describe('server-owned route ledge grip', () => {
     expect(room.players.climber.grabTargetId).toBe('')
     expect(room.players.climber.lastAcknowledgedGrab).toBe(1)
     expect(publicRoomSnapshot(room).players.climber.structureGripAnchorId).toBe(ANCHOR.id)
+  })
+
+  it.each([6, DEFAULT_CAMERA_ORBIT.distance, 15])('grabs a reachable ledge centred in the actual third-person view at zoom %s', (cameraDistance) => {
+    const room = placeRunner(airborneAtLedge(), 'climber', {
+      x: ANCHOR.hangX, y: ANCHOR.y - 0.9, z: ANCHOR.hangZ, velocityY: 0,
+    })
+    const climber = room.players.climber
+    // Camera origin comes from the body + horizontal boom, not a client-supplied target/position.
+    const command = { sequence: 1, grab: true, cameraYaw: 0, cameraDistance,
+      cameraPitch: Math.atan2(ANCHOR.y - (climber.y + 1.05), climber.z + cameraDistance - ANCHOR.z) }
+    const result = stepRoom(applyPlayerInput(room, 'session-a', command), 0.001).players.climber
+    expect(result.structureGripAnchorId).toBe(ANCHOR.id)
+    expect(result.lastAcknowledgedGrab).toBe(1)
+  })
+
+  it('does not catch a ledge behind the viewing direction just because the boom looks through the player', () => {
+    const room = placeRunner(airborneAtLedge(), 'climber', {
+      x: ANCHOR.hangX, y: ANCHOR.y - 0.9, z: ANCHOR.hangZ, velocityY: 0,
+    })
+    const command = { sequence: 1, grab: true, cameraYaw: Math.PI, cameraPitch: 0,
+      cameraDistance: DEFAULT_CAMERA_ORBIT.distance }
+    const result = stepRoom(applyPlayerInput(room, 'session-a', command), 0.001).players.climber
+    expect(result.structureGripAnchorId).toBe('')
+    expect(result.lastAcknowledgedGrab).toBe(0)
   })
 
   it('holds an airborne capsule at the authoritative hang point without teleporting', () => {
